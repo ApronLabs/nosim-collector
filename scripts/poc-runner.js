@@ -26,12 +26,14 @@ class PocRunner {
     const scriptPath = path.join(__dirname, `poc-${this.platform}.js`);
 
     // 세션 격리: 크롤러별 user-data-dir
-    // sikbom은 네이버 OAuth 로그인이 필요하고 매 실행마다 로그인하면 캡차/기기등록에
-    // 막히므로, 전용 stable 디렉토리를 써서 쿠키와 세션을 지속시킨다. 다른 플랫폼은
-    // 매 실행 새 임시 디렉토리로 완전 격리.
-    this._useStableDir = this.platform === 'sikbom';
+    // sikbom: 네이버 OAuth 로그인이 필요해 매 실행 로그인하면 캡차/기기등록에 막힘.
+    // baemin: ncapture 보안 화면 도입으로 자동 로그인 불가, 자동로그인 체크박스로
+    //   한 달 세션 유지가 의도된 정상 흐름인데 매번 임시 dir 이라 매일 로그인 필요했음.
+    // 둘 다 전용 stable 디렉토리 (~/.poc-<platform>-session) 로 쿠키/세션 지속.
+    // 다른 플랫폼은 자체 자동 로그인 스크립트가 있어 매번 fresh 임시 dir 로 격리.
+    this._useStableDir = ['sikbom', 'baemin'].includes(this.platform);
     if (this._useStableDir) {
-      this._tmpDir = path.join(os.homedir(), '.poc-sikbom-session');
+      this._tmpDir = path.join(os.homedir(), `.poc-${this.platform}-session`);
     } else {
       this._tmpDir = path.join(os.tmpdir(), `poc-${this.platform}-${Date.now()}`);
     }
