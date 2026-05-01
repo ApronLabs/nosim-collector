@@ -25,6 +25,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const POC_VERSION = app.getVersion() || 'unknown';
+const SHOW = process.argv.includes('--show');
 
 // ── CLI 인자 파싱 ──
 function getArg(name) {
@@ -225,12 +226,23 @@ const CLICK_NAVER_LOGIN_SCRIPT = `(async function() {
     'img[alt*="네이버"]',
     'img[alt*="naver"]',
   ];
+  // click 후 URL 변화로 실제 navigate 여부 검증.
+  // href="" 같은 placeholder element 가 click 됐을 때 false 반환해서 수동 fallback 으로 빠지게.
+  async function tryClick(el, used) {
+    const link = el.closest('a') || el;
+    const beforeUrl = window.location.href;
+    link.click();
+    await new Promise(r => setTimeout(r, 1500));
+    if (window.location.href !== beforeUrl) {
+      return { success: true, used, href: link.href || '', navigated: true };
+    }
+    return null;
+  }
   for (const sel of selectors) {
     const el = document.querySelector(sel);
     if (el) {
-      const link = el.closest('a') || el;
-      link.click();
-      return { success: true, used: sel, href: link.href || '' };
+      const r = await tryClick(el, sel);
+      if (r) return r;
     }
   }
   // 폴백: 텍스트 기반 검색
@@ -238,11 +250,11 @@ const CLICK_NAVER_LOGIN_SCRIPT = `(async function() {
   for (const el of allLinks) {
     const text = (el.textContent || '').trim();
     if (text.includes('네이버') || text.includes('NAVER') || text.includes('naver')) {
-      el.click();
-      return { success: true, used: 'text:' + text.slice(0, 30), href: el.href || '' };
+      const r = await tryClick(el, 'text:' + text.slice(0, 30));
+      if (r) return r;
     }
   }
-  return { success: false, error: 'naver login button not found on foodspring page' };
+  return { success: false, error: 'naver login button click 후 URL 변화 없음 — 셀렉터가 placeholder element 를 잡았거나 onclick 핸들러가 막힘' };
 })()`;
 
 // ── 서버 API ──
@@ -503,7 +515,7 @@ app.whenReady().then(async () => {
   const batch = pending.slice(0, MAX_ORDERS_PER_RUN);
   log(`   batch: ${batch.length}건 처리 시작`);
 
-  mainWindow = new BrowserWindow({ width: 1200, height: 900, show: false });
+  mainWindow = new BrowserWindow({ width: 1200, height: 900, show: SHOW });
   mainWindow.loadURL('about:blank');
   webView = new WebContentsView({
     webPreferences: { contextIsolation: false, nodeIntegration: false },
