@@ -8,6 +8,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
+const { sweepMissingDates } = require('./lib/date-sweep');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('coupangeats');
 
@@ -485,6 +486,12 @@ async function collectStore(name, id, dr) {
     const dayOrders = byDate[d];
     await sendToSalesKeeper('coupangeats', d, id, name, dayOrders);
   }
+
+  // 0건 마커 sweep — 요청 기간 중 주문 없는 날짜에도 빈 페이로드로 sync log 남김
+  const sweepStat = await sweepMissingDates(dr.startDash, dr.endDash, dates, (md) =>
+    sendToSalesKeeper('coupangeats', md, id, name, [])
+  );
+  if (sweepStat.sent > 0) log(`   0건 마커: ${sweepStat.sent}/${sweepStat.total}일`);
 
   // 진행 상황 emit
   emit('progress', { current: converted.length, total: totalOrderCount, date: dr.endDash });

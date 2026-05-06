@@ -11,7 +11,21 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { sweepMissingDates } = require('./lib/date-sweep');
 const POC_VERSION = app.getVersion() || 'unknown';
+
+// 노심 OkposSales 인터페이스에 맞춘 0매출 페이로드 (영업 안 한/POS 데이터 없는 날 마커용)
+const ZERO_OKPOS_SALES = Object.freeze({
+  totalSaleAmount: 0,
+  netSaleAmount: 0,
+  receiptCount: 0,
+  customerCount: 0,
+  vatAmount: 0,
+  cardAmount: 0,
+  cashAmount: 0,
+  cashReceiptAmount: 0,
+  totalDiscount: 0,
+});
 
 // ── CLI 인자 파싱 ──
 function getArg(name) {
@@ -454,6 +468,12 @@ app.whenReady().then(async () => {
         await sendToSalesKeeper(dateKey, shopCd, mapped, row);
       }
     }
+
+    // 0건 마커 sweep — 요청 기간 중 매출 데이터 없는 날짜에도 0매출 페이로드로 sync log 남김
+    const sweepStat = await sweepMissingDates(startDate, endDate, sortedDates, (md) =>
+      sendToSalesKeeper(md, shopCd, { ...ZERO_OKPOS_SALES }, {})
+    );
+    if (sweepStat.sent > 0) log(`   0건 마커: ${sweepStat.sent}/${sweepStat.total}일`);
 
     // ━━━ 6. 결과 요약 로그 ━━━
     log('\n--- 결과 요약 ---');
