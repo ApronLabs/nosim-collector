@@ -8,6 +8,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
+const { sweepMissingDates } = require('./lib/date-sweep');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('ddangyoyo');
 
@@ -887,6 +888,7 @@ app.whenReady().then(async () => {
 
       const dailySummaries = {};
       const sortedDates = Object.keys(byDate).sort();
+      const sentDates = []; // YYYY-MM-DD — 0건 sweep 비교용
 
       for (const dt of sortedDates) {
         const orders = byDate[dt];
@@ -914,7 +916,14 @@ app.whenReady().then(async () => {
           ordAmt: daySale,
           paynAmt: daySettl,
         }, mapped, orders.length);
+        sentDates.push(dateFormatted);
       }
+
+      // 0건 마커 sweep — 요청 기간 중 주문 없는 날짜에도 빈 페이로드로 sync log 남김
+      const sweepStat = await sweepMissingDates(dates.startDate, dates.endDate, sentDates, (md) =>
+        sendToSalesKeeper('ddangyoyo', md, store.value, { ordAmt: 0, paynAmt: 0 }, [], 0)
+      );
+      if (sweepStat.sent > 0) log(`   0건 마커: ${sweepStat.sent}/${sweepStat.total}일`);
 
       // 매장 합계
       let storeSale = 0, storeSettl = 0;

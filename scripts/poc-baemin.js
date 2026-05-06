@@ -8,6 +8,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
+const { sweepMissingDates } = require('./lib/date-sweep');
 
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('baemin');
@@ -662,20 +663,60 @@ app.whenReady().then(async () => {
       log(`   로그인 페이지: ${url.substring(0, 80)}`);
       emit('status', { msg: '배민 세션 만료 — 로그인 창에서 "자동 로그인" 체크 후 로그인해 주세요' });
 
-      // "자동 로그인" 체크박스만 자동 체크 (reCAPTCHA + 비번 + 버튼은 사장님).
+      // ID/PW 자동 입력 + "자동 로그인" 체크박스 자동 체크 — reCAPTCHA + 로그인 버튼만 사장님 처리.
       // 30일 쿠키(cookie30d) 발급받아 다음 회부터 로그인 페이지 진입 없이 크롤링.
+      // React 호환 native setter 사용 (단순 .value= 는 React state 와 desync).
+      const idJson = JSON.stringify(config.id || '');
+      const pwJson = JSON.stringify(config.pw || '');
+      await sleep(1500); // 폼 렌더 대기
       await webView.webContents.executeJavaScript(`(function() {
+        function setNativeValue(el, value) {
+          const proto = Object.getPrototypeOf(el);
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+                      || Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+          setter.call(el, value);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const result = { idFilled: false, pwFilled: false, autoLoginChecked: false };
+
+        const idInput = document.querySelector('input[name="id"]')
+                     || document.querySelector('input[type="text"]:not([disabled])');
+        if (idInput) {
+          setNativeValue(idInput, ${idJson});
+          result.idFilled = true;
+        }
+        const pwInput = document.querySelector('input[type="password"]');
+        if (pwInput) {
+          setNativeValue(pwInput, ${pwJson});
+          result.pwFilled = true;
+        }
+
         const labels = document.querySelectorAll('label, span, div');
         for (const label of labels) {
           const text = (label.textContent || '').trim();
           if (text === '자동 로그인') {
             const parent = label.closest('label') || label.parentElement;
             const checkbox = parent?.querySelector('input[type="checkbox"]');
-            if (checkbox && !checkbox.checked) { checkbox.click(); return { checked: true }; }
+            if (checkbox && !checkbox.checked) { checkbox.click(); result.autoLoginChecked = true; }
+            break;
           }
         }
-        return { checked: false };
-      })()`).catch(() => {});
+        return result;
+      })()`).then(r => log(`   자동 입력: ${JSON.stringify(r)}`)).catch(() => {});
+
+      // 자동 입력 후 로그인 버튼 자동 click 시도.
+      // reCAPTCHA 가 떠있으면 click 막혀서 페이지 변화 없음 → 그대로 mainWindow.show() 후 사장님 수동.
+      // reCAPTCHA 없는 경우 (대다수) 자동 통과.
+      await sleep(1500);
+      await webView.webContents.executeJavaScript(`(function() {
+        const byType = document.querySelector('button[type="submit"]');
+        if (byType) { byType.click(); return { clicked: 'submit' }; }
+        const buttons = [...document.querySelectorAll('button')];
+        const loginBtn = buttons.find(b => (b.textContent || '').trim() === '로그인');
+        if (loginBtn) { loginBtn.click(); return { clicked: 'text' }; }
+        return { clicked: false };
+      })()`).then(r => log(`   로그인 버튼 자동 click: ${JSON.stringify(r)}`)).catch(() => {});
 
       mainWindow.show();
       mainWindow.focus();
@@ -934,6 +975,12 @@ app.whenReady().then(async () => {
         const dayOrders = byDate[dateKey].orders;
         await sendToSalesKeeper('baemin', dateKey, shop.shopNumber, shop.shopName, dayOrders);
       }
+
+      // 0건 마커 sweep — 요청 기간 중 주문 없는 날짜에도 빈 페이로드로 sync log 남김
+      const sweepStat = await sweepMissingDates(startDate, endDate, sortedDates, (d) =>
+        sendToSalesKeeper('baemin', d, shop.shopNumber, shop.shopName, [])
+      );
+      if (sweepStat.sent > 0) log(`   0건 마커: ${sweepStat.sent}/${sweepStat.total}일`);
 
       // ★ v3.5.8: CPC 광고비 수집 + 별도 엔드포인트 전송
       // ★ v3.9.0: 주문 데이터에서 매출일 → settlement_date 맵 구성 (광고비 settlement_date 정확도)

@@ -8,6 +8,7 @@ const { app, BrowserWindow, WebContentsView } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
+const { sweepMissingDates } = require('./lib/date-sweep');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('yogiyo');
 
@@ -1039,6 +1040,12 @@ app.whenReady().then(async () => {
         const dayOrders = dailyGroups[date];
         await sendToSalesKeeper('yogiyo', date, store.storeId, dayOrders);
       }
+
+      // 0건 마커 sweep — 요청 기간 중 주문 없는 날짜에도 빈 페이로드로 sync log 남김
+      const sweepStat = await sweepMissingDates(startDate, endDate, sortedDates, (d) =>
+        sendToSalesKeeper('yogiyo', d, store.storeId, [])
+      );
+      if (sweepStat.sent > 0) log(`   0건 마커: ${sweepStat.sent}/${sweepStat.total}일`);
 
       allStoreResults.push({
         storeName: store.storeName,
