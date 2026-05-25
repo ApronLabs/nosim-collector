@@ -21,6 +21,7 @@ param(
   [string]$Time = "11:00",
   [int]$EveryMinutes = 30,
   [int]$ForHours = 6,
+  [string]$ExtraArgs = "",
   [string]$TaskName = "NosimSalesCollect"
 )
 
@@ -36,7 +37,9 @@ $node = $nodeCmd.Source
 
 if (-not (Test-Path $script)) { throw "collect script not found: $script" }
 
-$action  = New-ScheduledTaskAction -Execute $node -Argument "`"$script`"" -WorkingDirectory $repo
+$argStr = "`"$script`""
+if ($ExtraArgs) { $argStr = "$argStr $ExtraArgs" }   # e.g. --today (당일 실시간 수집)
+$action  = New-ScheduledTaskAction -Execute $node -Argument $argStr -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
 # Repeat every $EveryMinutes for $ForHours so a store that failed (captcha/network)
 # gets retried automatically. Each run skips stores already collected (sync-status),

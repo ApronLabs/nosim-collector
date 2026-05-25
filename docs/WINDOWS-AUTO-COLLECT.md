@@ -97,10 +97,19 @@ node scripts\collect-stores.js
 
 ## 4. 작업 스케줄러 등록
 
+**작업 2개**를 한 번에 등록 — `scripts\register-tasks.cmd` 더블클릭 (또는 cmd 실행):
+
+| 작업 | 대상 | 주기 | skip |
+|---|---|---|---|
+| `NosimSalesCollect` | **어제** (백필/마무리) | 11:00~17:00, 30분 간격 | 이미 수집된 건 skip, 미수집만 재시도 |
+| `NosimSalesCollectToday` | **오늘** (실시간) | 10:00~다음날 04:00, 30분 간격 | **skip 안 함** — 매번 재수집해 새 주문 흡수 (중복은 노심 upsert 가 방지) |
+
+개별 등록/조정:
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1
-# 시각/반복 바꾸려면:
+# 어제 백필
 powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time "11:00" -EveryMinutes 30 -ForHours 6
+# 당일 실시간 (10:00부터 18시간 = 04:00 까지)
+powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -TaskName "NosimSalesCollectToday" -ExtraArgs "--today" -Time "10:00" -EveryMinutes 30 -ForHours 18
 ```
 
 - 매일 **11:00 부터 30분 간격으로 6시간(11~17시) 반복** 실행 (로그온 사용자 세션).
