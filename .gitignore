@@ -26,6 +26,9 @@ crawl-result-*.json
 *.log.txt
 poc-*-log.txt
 
+# 자동 수집 로그
+collect-logs/
+
 # Debug POC scripts (local-only)
 scripts/poc-*-debug.js
 scripts/poc-*-debug-log.txt
