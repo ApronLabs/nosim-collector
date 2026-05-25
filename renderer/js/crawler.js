@@ -15,6 +15,9 @@ const $range = document.getElementById('rangeSelect');
 const $refresh = document.getElementById('refreshBtn');
 
 let autoTimer = null;
+let DASHBOARD = false;
+let reloggingIn = false;
+let lastReloginAt = 0;
 
 // ─── KST 날짜 ───
 function kstNow() {
@@ -127,8 +130,7 @@ async function load() {
     const res = await window.crawler.getCollectionStatus({ startDate, endDate });
     if (!res || !res.success) {
       if (res && res.code === 'UNAUTHORIZED') {
-        setMessage('세션이 만료되었습니다. 다시 로그인합니다…', true);
-        setTimeout(() => window.api.navigate('login'), 1500);
+        await handleSessionExpired();
         return;
       }
       setMessage((res && res.message) || '수집 현황을 불러오지 못했습니다.', true);
@@ -151,14 +153,43 @@ function scheduleAuto() {
   autoTimer = setInterval(load, AUTO_REFRESH_MS);
 }
 
+// ─── 세션 만료 처리 ───
+// 대시보드 모드: 자동 재로그인 후 새로고침(로그인 화면으로 안 빠짐). 30초 백오프로 루프 방지.
+// 일반 모드: 로그인 화면으로 이동.
+async function handleSessionExpired() {
+  if (!DASHBOARD) {
+    setMessage('세션이 만료되었습니다. 다시 로그인합니다…', true);
+    setTimeout(() => window.api.navigate('login'), 1500);
+    return;
+  }
+  const now = Date.now();
+  if (reloggingIn || now - lastReloginAt < 30000) {
+    setMessage('세션 갱신 대기 중… (잠시 후 자동 재시도)', true);
+    return;
+  }
+  reloggingIn = true;
+  lastReloginAt = now;
+  setMessage('세션 갱신 중…', false);
+  let ok = false;
+  try { const r = await window.crawler.relogin(); ok = !!(r && r.success); } catch {}
+  reloggingIn = false;
+  if (ok) await load();
+  else setMessage('세션 갱신 실패 — 잠시 후 자동 재시도합니다.', true);
+}
+
 // ─── 이벤트 ───
 document.getElementById('backBtn').addEventListener('click', () => window.api.navigate('scanner'));
 $refresh.addEventListener('click', load);
 $range.addEventListener('change', load);
-window.api.onSessionExpired(() => {
-  setMessage('세션이 만료되었습니다. 다시 로그인합니다…', true);
-  setTimeout(() => window.api.navigate('login'), 1500);
-});
+window.api.onSessionExpired(() => { handleSessionExpired(); });
 
-load();
-scheduleAuto();
+// ─── 초기화 ───
+(async function init() {
+  try { DASHBOARD = await window.crawler.getDashboardMode(); } catch {}
+  if (DASHBOARD) {
+    const back = document.getElementById('backBtn');
+    if (back) back.style.display = 'none'; // 상황판 전용 PC 에선 뒤로가기 불필요
+  }
+  load();
+  scheduleAuto();
+})();

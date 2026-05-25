@@ -41,4 +41,7 @@ contextBridge.exposeInMainWorld('crawler', {
   onSchedulerUpdate: (callback) => ipcRenderer.on('scheduler-update', (_, data) => callback(data)),
   // 수집 현황 상태판: 수집 대상 매장(config) × 플랫폼 × 날짜별 수집 성공 여부
   getCollectionStatus: (range) => ipcRenderer.invoke('get-collection-status', range),
+  // 대시보드(상황판) 모드 여부 + 세션 만료 시 자동 재로그인
+  getDashboardMode: () => ipcRenderer.invoke('get-dashboard-mode'),
+  relogin: () => ipcRenderer.invoke('dashboard-relogin'),
 });

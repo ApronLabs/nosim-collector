@@ -6,6 +6,7 @@
   "author": "Semicolon Dev Team",
   "scripts": {
     "start": "electron .",
+    "dashboard": "electron . --dashboard",
     "build": "electron-builder --win --mac",
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
