@@ -722,6 +722,64 @@ ipcMain.handle('clear-results', () => {
   return { success: true };
 });
 
+// IPC: 수집 현황 (상태판) — 수집 대상 매장 × 플랫폼 × 날짜별 수집 성공 여부
+// 수집 대상은 scripts/collect-stores.config.json 한 곳에서 관리(수집 스크립트와 동일 소스).
+// 매장이 늘면 config 에만 추가하면 수집·보드 양쪽에 자동 반영. 분점 등 미대상 매장은 안 뜸.
+ipcMain.handle('get-collection-status', async (_event, { startDate, endDate } = {}) => {
+  const fs = require('fs');
+  const s = initStore();
+  const serverUrl = s.get('serverUrl');
+  if (!serverUrl) return { success: false, message: '서버가 설정되지 않았습니다.' };
+  if (!startDate || !endDate) return { success: false, message: 'startDate, endDate가 필요합니다.' };
+
+  const DATE_PLATFORMS = ['baemin', 'yogiyo', 'coupangeats', 'ddangyoyo', 'okpos'];
+  const PLATFORM_LABELS = { baemin: '배민', yogiyo: '요기요', coupangeats: '쿠팡이츠', ddangyoyo: '땡겨요', okpos: 'OKPOS' };
+
+  // 수집 대상 매장 목록 (수집 스크립트와 공유하는 단일 소스)
+  let targetStores = [];
+  try {
+    const cfgPath = path.join(__dirname, 'scripts', 'collect-stores.config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    targetStores = (cfg.stores || []).filter((st) => st.storeId);
+  } catch (err) {
+    return { success: false, message: '수집 대상 설정을 읽지 못했습니다: ' + err.message };
+  }
+
+  let unauthorized = false;
+  try {
+    const result = await Promise.all(targetStores.map(async (store) => {
+      const platforms = (store.platforms || []).filter((p) => DATE_PLATFORMS.includes(p));
+      if (platforms.length === 0) return { storeId: store.storeId, name: store.name, platforms: [] };
+
+      let syncedDates = {};
+      try {
+        const ssUrl = `${serverUrl}/api/stores/${encodeURIComponent(store.storeId)}/crawler/sync-status`
+          + `?sources=${platforms.join(',')}&startDate=${startDate}&endDate=${endDate}`;
+        const ssRes = await authenticatedFetch(ssUrl);
+        if (ssRes.unauthorized) { unauthorized = true; }
+        else if (ssRes.response.ok) {
+          const ssData = await ssRes.response.json();
+          syncedDates = ssData.syncedDates || {};
+        }
+      } catch (err) {
+        console.error('[collection-status] sync-status 실패:', store.storeId, err.message);
+      }
+
+      return {
+        storeId: store.storeId,
+        name: store.name,
+        platforms: platforms.map((p) => ({ platform: p, label: PLATFORM_LABELS[p] || p, dates: syncedDates[p] || [] })),
+      };
+    }));
+
+    if (unauthorized) return { success: false, code: 'UNAUTHORIZED', message: '세션이 만료되었습니다.' };
+    return { success: true, stores: result };
+  } catch (err) {
+    console.error('[collection-status] 오류:', err.message);
+    return { success: false, message: '수집 현황 조회 실패: ' + err.message };
+  }
+});
+
 // IPC: 스케줄러 상태 조회
 ipcMain.handle('get-scheduler-status', () => {
   if (!scheduler) return { enabled: false };

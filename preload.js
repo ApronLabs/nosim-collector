@@ -39,4 +39,6 @@ contextBridge.exposeInMainWorld('crawler', {
   getSchedulerStatus: () => ipcRenderer.invoke('get-scheduler-status'),
   triggerBackfill: () => ipcRenderer.invoke('trigger-backfill'),
   onSchedulerUpdate: (callback) => ipcRenderer.on('scheduler-update', (_, data) => callback(data)),
+  // 수집 현황 상태판: 수집 대상 매장(config) × 플랫폼 × 날짜별 수집 성공 여부
+  getCollectionStatus: (range) => ipcRenderer.invoke('get-collection-status', range),
 });
