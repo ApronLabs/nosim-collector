@@ -2,208 +2,80 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <title>매출 크롤러</title>
+  <title>매출 수집 현황</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #f5f5f5; padding: 24px; }
-    h1 { font-size: 22px; margin-bottom: 4px; }
-    .subtitle { font-size: 13px; color: #888; margin-bottom: 20px; }
+    body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #f5f5f5; padding: 24px; color: #111827; }
 
-    .top-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .top-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
     .back-btn { background: none; border: 1px solid #d1d5db; color: #374151; padding: 6px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
     .back-btn:hover { background: #f9fafb; }
+    h1 { font-size: 22px; }
+    .subtitle { font-size: 13px; color: #888; margin-top: 2px; }
+    .version-badge { font-size: 11px; color: #9ca3af; }
 
-    .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .card h2 { font-size: 14px; color: #666; margin-bottom: 12px; }
+    .controls { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .controls select, .controls button {
+      padding: 7px 14px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 13px; background: white; color: #374151; cursor: pointer;
+    }
+    .controls button.refresh { background: #2563eb; color: white; border-color: #2563eb; font-weight: 600; }
+    .controls button.refresh:hover { background: #1d4ed8; }
+    .controls button.refresh:disabled { background: #93c5fd; border-color: #93c5fd; cursor: default; }
+    .meta { font-size: 12px; color: #6b7280; margin-left: auto; }
+    .legend { font-size: 12px; color: #6b7280; display: flex; gap: 14px; align-items: center; }
+    .legend .ok { color: #059669; }
+    .legend .miss { color: #9ca3af; }
 
-    /* 플랫폼 카드 그리드 */
-    .platform-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
-    .platform-card { border: 2px solid #e5e7eb; border-radius: 10px; padding: 14px; position: relative; transition: border-color 0.2s, background 0.2s; }
-    .platform-card.active { border-color: #10b981; }
-    .platform-card.disabled { border-color: #e5e7eb; background: #fafafa; }
-    .platform-card.received { border-color: #10b981; background: #f0fdf4; }
-    .platform-card.error { border-color: #ef4444; background: #fef2f2; }
+    #message { font-size: 13px; color: #6b7280; padding: 40px; text-align: center; }
+    #message.error { color: #b91c1c; }
 
-    .platform-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-    .platform-name { font-size: 14px; font-weight: 700; color: #374151; }
-    .platform-edit-btn { background: none; border: 1px solid #d1d5db; color: #6b7280; padding: 3px 10px; border-radius: 5px; font-size: 11px; font-weight: 500; cursor: pointer; }
-    .platform-edit-btn:hover { background: #f3f4f6; color: #374151; }
-    .platform-edit-btn.editing { background: #4338ca; color: white; border-color: #4338ca; }
-    .platform-edit-btn.editing:hover { background: #3730a3; }
+    /* 매장 섹션 */
+    .store-section { background: white; border-radius: 10px; padding: 16px 18px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+    .store-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .store-bar { width: 4px; height: 18px; background: #2563eb; border-radius: 2px; }
+    .store-name { font-size: 16px; font-weight: 700; }
+    .store-empty { font-size: 12px; color: #9ca3af; padding: 6px 0; }
 
-    .platform-card input { width: 100%; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; margin-bottom: 6px; outline: none; background: #f9fafb; color: #374151; }
-    .platform-card input:read-only { cursor: default; color: #6b7280; }
-    .platform-card input:not(:read-only) { border-color: #d1d5db; background: white; }
-    .platform-card input:not(:read-only):focus { border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.15); }
-    .platform-card input::placeholder { color: #9ca3af; }
-
-    .platform-badge { display: inline-block; margin-top: 6px; padding: 2px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; }
-    .badge-wait { background: #f3f4f6; color: #666; }
-    .badge-ok { background: #d1fae5; color: #065f46; }
-    .badge-fail { background: #fee2e2; color: #991b1b; }
-    .badge-inactive { background: #f3f4f6; color: #9ca3af; }
-    .badge-active { background: #dbeafe; color: #1e40af; }
-
-    .cred-status { font-size: 12px; margin-top: 4px; min-height: 18px; }
-
-    /* 스케줄러 상태 */
-    .scheduler-row { display: flex; align-items: center; gap: 10px; }
-    .scheduler-dot { width: 8px; height: 8px; border-radius: 50%; background: #9ca3af; flex-shrink: 0; }
-    .scheduler-dot.active { background: #10b981; }
-    .scheduler-info { font-size: 12px; color: #6b7280; }
-    .scheduler-info strong { color: #374151; }
-    .backfill-bar { margin-top: 8px; }
-    .backfill-bar-bg { height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
-    .backfill-bar-fill { height: 100%; background: #3b82f6; border-radius: 3px; transition: width 0.3s; }
-    .backfill-text { font-size: 11px; color: #6b7280; margin-top: 4px; }
-
-    #status { font-size: 13px; color: #666; text-align: center; margin-bottom: 12px; min-height: 20px; }
-
-    .btn-group { display: flex; gap: 10px; margin-bottom: 16px; }
-    button { padding: 10px 20px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
-    .btn-secondary { background: white; border: 1px solid #d1d5db; color: #374151; }
-    .btn-secondary:hover { background: #f9fafb; }
-    .btn-danger { background: white; border: 1px solid #fca5a5; color: #dc2626; }
-    .btn-danger:hover { background: #fef2f2; }
-    .btn-start { background: #10b981; color: white; font-size: 15px; padding: 14px 24px; flex: 1; }
-    .btn-start:hover { background: #059669; }
-    .btn-start:disabled { background: #6ee7b7; cursor: not-allowed; }
-
-    .guide { background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 14px; font-size: 12px; color: #92400e; margin-bottom: 16px; }
-
-    #result-area { display: none; }
-    .result-tabs { display: flex; gap: 4px; margin-bottom: 0; }
-    .result-tab { padding: 6px 14px; border: 1px solid #e5e7eb; border-radius: 6px 6px 0 0; background: #f9fafb; font-size: 12px; cursor: pointer; border-bottom: none; }
-    .result-tab.active { background: white; font-weight: 700; color: #2563eb; }
-    .result-content { background: white; border: 1px solid #e5e7eb; border-radius: 0 8px 8px 8px; padding: 14px; }
-
-    /* 매장별 서브탭 */
-    .shop-tabs { display: flex; gap: 2px; margin-bottom: 12px; padding: 4px; background: #f3f4f6; border-radius: 6px; }
-    .shop-tab { padding: 5px 12px; border: none; border-radius: 4px; background: transparent; font-size: 11px; cursor: pointer; color: #6b7280; font-weight: 500; transition: all 0.15s; white-space: nowrap; }
-    .shop-tab:hover { background: #e5e7eb; color: #374151; }
-    .shop-tab.active { background: white; color: #2563eb; font-weight: 700; box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
-    .shop-summary { display: flex; gap: 12px; margin-bottom: 12px; }
-    .shop-summary-item { flex: 1; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px; text-align: center; }
-    .shop-summary-label { font-size: 11px; color: #6b7280; margin-bottom: 2px; }
-    .shop-summary-value { font-size: 16px; font-weight: 700; color: #059669; }
-
-    .order-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .order-table th { background: #f9fafb; padding: 8px 10px; text-align: left; font-weight: 600; color: #374151; border-bottom: 2px solid #e5e7eb; }
-    .order-table td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; color: #4b5563; }
-    .order-table tr:hover td { background: #f9fafb; }
-    .amount { font-weight: 600; color: #059669; }
-    .total-row { font-size: 14px; font-weight: 700; background: #f0fdf4; }
-    .total-row td { padding: 12px 10px; border-top: 2px solid #10b981; }
-
-    #result-json { font-size: 11px; font-family: 'SF Mono', Consolas, monospace; white-space: pre-wrap; max-height: 400px; overflow-y: auto; background: #f9fafb; padding: 14px; border-radius: 8px; border: 1px solid #e5e7eb; line-height: 1.4; }
+    .grid-scroll { overflow-x: auto; }
+    table.grid { border-collapse: collapse; font-size: 12px; }
+    table.grid th, table.grid td { text-align: center; padding: 5px 7px; white-space: nowrap; }
+    table.grid thead th { color: #6b7280; font-weight: 600; border-bottom: 1px solid #e5e7eb; }
+    table.grid thead th.dow-0 { color: #ef4444; }      /* 일 */
+    table.grid thead th.dow-6 { color: #2563eb; }      /* 토 */
+    table.grid thead th.today { background: #eff6ff; border-radius: 6px 6px 0 0; color: #1d4ed8; font-weight: 700; }
+    table.grid th.platform { text-align: left; font-weight: 600; color: #374151; padding-right: 14px; min-width: 84px; }
+    table.grid td.cell { font-size: 14px; }
+    table.grid td.cell.today { background: #eff6ff; }
+    table.grid td.ok { color: #10b981; }
+    table.grid td.miss { color: #d1d5db; }
+    .date-num { font-size: 12px; }
+    .date-dow { font-size: 10px; display: block; opacity: 0.7; }
   </style>
 </head>
 <body>
   <div class="top-nav">
     <button class="back-btn" id="backBtn">← 뒤로</button>
     <div style="flex: 1;">
-      <h1>매출 크롤러</h1>
-      <p class="subtitle">배민 / 요기요 / 쿠팡이츠 / 땡겨요 / OKPOS 매출 자동 수집</p>
+      <h1>매출 수집 현황</h1>
+      <p class="subtitle">매장별 · 플랫폼별 · 날짜별 수집 성공 여부</p>
     </div>
     <span id="appVersion" class="version-badge"></span>
   </div>
   <script src="js/version-display.js" defer></script>
 
-  <div class="card">
-    <h2>플랫폼 계정</h2>
-    <div class="platform-grid">
-      <div class="platform-card disabled" id="card-baemin" data-site="baemin">
-        <div class="platform-header">
-          <span class="platform-name">배달의민족</span>
-          <button class="platform-edit-btn" data-site="baemin">수정</button>
-        </div>
-        <input type="text" id="cred-baemin-id" placeholder="아이디" readonly>
-        <input type="password" id="cred-baemin-pw" placeholder="비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-baemin">미등록</span>
-      </div>
-      <div class="platform-card disabled" id="card-yogiyo" data-site="yogiyo">
-        <div class="platform-header">
-          <span class="platform-name">요기요</span>
-          <button class="platform-edit-btn" data-site="yogiyo">수정</button>
-        </div>
-        <input type="text" id="cred-yogiyo-id" placeholder="아이디" readonly>
-        <input type="password" id="cred-yogiyo-pw" placeholder="비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-yogiyo">미등록</span>
-      </div>
-      <div class="platform-card disabled" id="card-coupangeats" data-site="coupangeats">
-        <div class="platform-header">
-          <span class="platform-name">쿠팡이츠</span>
-          <button class="platform-edit-btn" data-site="coupangeats">수정</button>
-        </div>
-        <input type="text" id="cred-coupangeats-id" placeholder="아이디" readonly>
-        <input type="password" id="cred-coupangeats-pw" placeholder="비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-coupangeats">미등록</span>
-      </div>
-      <div class="platform-card disabled" id="card-ddangyoyo" data-site="ddangyoyo">
-        <div class="platform-header">
-          <span class="platform-name">땡겨요</span>
-          <button class="platform-edit-btn" data-site="ddangyoyo">수정</button>
-        </div>
-        <input type="text" id="cred-ddangyoyo-id" placeholder="아이디" readonly>
-        <input type="password" id="cred-ddangyoyo-pw" placeholder="비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-ddangyoyo">미등록</span>
-      </div>
-      <div class="platform-card disabled" id="card-okpos" data-site="okpos">
-        <div class="platform-header">
-          <span class="platform-name">OKPOS</span>
-          <button class="platform-edit-btn" data-site="okpos">수정</button>
-        </div>
-        <input type="text" id="cred-okpos-id" placeholder="아이디" readonly>
-        <input type="password" id="cred-okpos-pw" placeholder="비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-okpos">미등록</span>
-      </div>
-      <div class="platform-card disabled" id="card-sikbom" data-site="sikbom">
-        <div class="platform-header">
-          <span class="platform-name">식봄 (네이버 로그인)</span>
-          <button class="platform-edit-btn" data-site="sikbom">수정</button>
-        </div>
-        <input type="text" id="cred-sikbom-id" placeholder="네이버 아이디" readonly>
-        <input type="password" id="cred-sikbom-pw" placeholder="네이버 비밀번호" readonly>
-        <span class="platform-badge badge-inactive" id="badge-sikbom">미등록</span>
-      </div>
-    </div>
-    <div class="cred-status" id="credStatus"></div>
+  <div class="controls">
+    <select id="rangeSelect">
+      <option value="7">최근 7일</option>
+      <option value="14" selected>최근 14일</option>
+      <option value="30">최근 30일</option>
+    </select>
+    <button class="refresh" id="refreshBtn">새로고침</button>
+    <span class="legend"><span class="ok">✅ 수집됨</span><span class="miss">⬜ 미수집</span></span>
+    <span class="meta" id="meta"></span>
   </div>
 
-  <div class="card">
-    <h2>자동 수집 스케줄</h2>
-    <div class="scheduler-row">
-      <div class="scheduler-dot" id="schedulerDot"></div>
-      <div class="scheduler-info" id="schedulerInfo">확인 중...</div>
-    </div>
-    <div class="backfill-bar" id="backfillArea" style="display:none;">
-      <div class="backfill-bar-bg"><div class="backfill-bar-fill" id="backfillFill" style="width:0%"></div></div>
-      <div class="backfill-text" id="backfillText"></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div id="status"></div>
-    <div class="btn-group">
-      <button class="btn-start" id="btnAutoCrawl">수동 크롤링 시작</button>
-    </div>
-
-    <div class="guide">
-      <p><strong>수동 크롤링</strong>: 계정이 등록된 플랫폼만 수집됩니다. 자동 수집은 1시간 단위로 실행됩니다.</p>
-    </div>
-
-    <div class="btn-group">
-      <button class="btn-secondary" id="btnExportExcel">엑셀 내보내기</button>
-      <button class="btn-secondary" id="btnExport">JSON 내보내기</button>
-      <button class="btn-danger" id="btnClear">초기화</button>
-    </div>
-  </div>
-
-  <div class="card" id="result-area">
-    <h2>크롤링 결과</h2>
-    <div class="result-tabs" id="result-tabs"></div>
-    <div class="result-content" id="result-content"></div>
-  </div>
+  <div id="message">불러오는 중…</div>
+  <div id="board"></div>
 
   <script src="js/crawler.js"></script>
 </body>

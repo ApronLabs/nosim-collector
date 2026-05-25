@@ -722,6 +722,71 @@ ipcMain.handle('clear-results', () => {
   return { success: true };
 });
 
+// IPC: 수집 현황 (상태판) — 접근 가능한 전 매장 × 등록 플랫폼 × 날짜별 수집 성공 여부
+// 비밀번호는 일절 가져오지 않음(withCredentials 미사용). 등록 플랫폼 목록 + sync-status 만.
+ipcMain.handle('get-collection-status', async (_event, { startDate, endDate } = {}) => {
+  const s = initStore();
+  const serverUrl = s.get('serverUrl');
+  if (!serverUrl) return { success: false, message: '서버가 설정되지 않았습니다.' };
+  if (!startDate || !endDate) return { success: false, message: 'startDate, endDate가 필요합니다.' };
+
+  const DATE_PLATFORMS = ['baemin', 'yogiyo', 'coupangeats', 'ddangyoyo', 'okpos'];
+  try {
+    // 1) 접근 가능한 매장 목록
+    const storesRes = await authenticatedFetch(`${serverUrl}/api/stores`);
+    if (storesRes.unauthorized) return { success: false, code: 'UNAUTHORIZED', message: '세션이 만료되었습니다.' };
+    if (!storesRes.response.ok) return { success: false, message: '매장 목록 조회 실패' };
+    const storesData = await storesRes.response.json();
+    const stores = storesData.data || [];
+
+    // 2) 매장별 등록 플랫폼 + sync-status (병렬)
+    const result = await Promise.all(stores.map(async (store) => {
+      let platforms = [];
+      try {
+        const paUrl = `${serverUrl}/api/suppliers/platform-accounts?storeId=${encodeURIComponent(store.id)}`;
+        const paRes = await authenticatedFetch(paUrl);
+        if (!paRes.unauthorized && paRes.response.ok) {
+          const paData = await paRes.response.json();
+          platforms = (paData.data || [])
+            .filter((p) => p.registered && DATE_PLATFORMS.includes(p.platform))
+            .map((p) => ({ platform: p.platform, label: p.label || p.platform }));
+        }
+      } catch (err) {
+        console.error('[collection-status] 플랫폼 조회 실패:', store.id, err.message);
+      }
+
+      if (platforms.length === 0) {
+        return { storeId: store.id, name: store.name, platforms: [] };
+      }
+
+      let syncedDates = {};
+      try {
+        const sources = platforms.map((p) => p.platform).join(',');
+        const ssUrl = `${serverUrl}/api/stores/${encodeURIComponent(store.id)}/crawler/sync-status`
+          + `?sources=${sources}&startDate=${startDate}&endDate=${endDate}`;
+        const ssRes = await authenticatedFetch(ssUrl);
+        if (!ssRes.unauthorized && ssRes.response.ok) {
+          const ssData = await ssRes.response.json();
+          syncedDates = ssData.syncedDates || {};
+        }
+      } catch (err) {
+        console.error('[collection-status] sync-status 실패:', store.id, err.message);
+      }
+
+      return {
+        storeId: store.id,
+        name: store.name,
+        platforms: platforms.map((p) => ({ ...p, dates: syncedDates[p.platform] || [] })),
+      };
+    }));
+
+    return { success: true, stores: result };
+  } catch (err) {
+    console.error('[collection-status] 오류:', err.message);
+    return { success: false, message: '수집 현황 조회 실패: ' + err.message };
+  }
+});
+
 // IPC: 스케줄러 상태 조회
 ipcMain.handle('get-scheduler-status', () => {
   if (!scheduler) return { enabled: false };
