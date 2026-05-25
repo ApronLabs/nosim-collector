@@ -104,9 +104,10 @@ powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time
 ```
 
 - 매일 지정 시각(기본 **11:00**)에 로그온 사용자 세션에서 수집 실행.
+- 작업 이름은 **`NosimSalesCollect`** (영문). PowerShell 5.1 이 BOM 없는 스크립트를 한글 코드페이지로 읽어 한글 작업이름이 깨지면 `0x8007007B` 로 등록 실패 → 이름은 ASCII 로 고정.
 - PC 가 그 시각에 꺼져 있었으면 켜진 직후 자동 실행(`StartWhenAvailable`).
-- 바로 테스트: `Start-ScheduledTask -TaskName "노심-매출자동수집"`
-- 해제: `Unregister-ScheduledTask -TaskName "노심-매출자동수집" -Confirm:$false`
+- 바로 테스트: `Start-ScheduledTask -TaskName "NosimSalesCollect"`
+- 해제: `Unregister-ScheduledTask -TaskName "NosimSalesCollect" -Confirm:$false`
 
 ---
 
