@@ -56,6 +56,9 @@ function kstYesterday() {
   kst.setUTCDate(kst.getUTCDate() - 1);
   return kst.toISOString().slice(0, 10);
 }
+function kstToday() {
+  return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+}
 function kstNow() {
   return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
 }
@@ -204,7 +207,9 @@ function waitExit(child) {
 
 async function runAll({ dryRun }) {
   const cfg = loadConfig();
-  const targetDate = getArg('targetDate') || kstYesterday();
+  // --today: 당일(오늘) 실시간 수집. 없으면 어제(백필).
+  const targetDate = getArg('targetDate') || (hasFlag('today') ? kstToday() : kstYesterday());
+  const isToday = targetDate === kstToday();
   setLogFile(targetDate);
 
   const email = process.env.NOSIM_EMAIL;
@@ -215,7 +220,7 @@ async function runAll({ dryRun }) {
   }
 
   log('════════════════════════════════════════');
-  log(`  매장별 매출 자동 수집  (target=${targetDate}, KST ${kstNow()})`);
+  log(`  매장별 매출 자동 수집  (target=${targetDate}${isToday ? ' [당일 실시간]' : ''}, KST ${kstNow()})`);
   log(`  대상 매장 ${cfg.stores.length}곳${dryRun ? '  [DRY-RUN]' : ''}`);
   log('════════════════════════════════════════');
 
@@ -231,8 +236,9 @@ async function runAll({ dryRun }) {
   const summary = [];
   for (const store of cfg.stores) {
     const platforms = (store.platforms || []).filter((p) => DATE_PLATFORMS.includes(p));
-    // 이미 수집된 플랫폼은 skip — 미수집만 (재)수집. 30분 반복 실행 대비.
-    const done = await fetchSyncedPlatforms(cfg.serverUrl, store.storeId, platforms, targetDate, token);
+    // 당일(오늘)은 새 주문 흡수 위해 항상 재수집(skip 안 함, 중복은 노심 upsert 가 방지).
+    // 과거 날짜는 이미 수집된 플랫폼 skip — 미수집만 재시도(30분 반복 대비).
+    const done = isToday ? new Set() : await fetchSyncedPlatforms(cfg.serverUrl, store.storeId, platforms, targetDate, token);
     const remaining = platforms.filter((p) => !done.has(p));
 
     log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 대상: ${remaining.length ? remaining.join(', ') : '없음 (이미 수집 완료)'} ━━━`);
