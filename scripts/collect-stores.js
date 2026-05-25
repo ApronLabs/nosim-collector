@@ -97,6 +97,29 @@ async function fetchStoreCredentials(serverUrl, storeId, token) {
   return creds;
 }
 
+// sync-status 가 인정하는 날짜기반 플랫폼
+const DATE_PLATFORMS = ['baemin', 'yogiyo', 'coupangeats', 'ddangyoyo', 'okpos'];
+
+// targetDate 기준 이미 수집 완료된 플랫폼 Set 반환 (sync-status).
+// 실패 시 빈 Set → 전부 수집 시도(안전). 30분 반복 실행 시 미수집만 골라내는 데 사용.
+async function fetchSyncedPlatforms(serverUrl, storeId, platforms, targetDate, token) {
+  if (!platforms.length) return new Set();
+  const url = `${serverUrl}/api/stores/${encodeURIComponent(storeId)}/crawler/sync-status`
+    + `?sources=${platforms.join(',')}&startDate=${targetDate}&endDate=${targetDate}`;
+  try {
+    const res = await fetch(url, { headers: { Cookie: `session-token=${token}` } });
+    if (!res.ok) return new Set();
+    const synced = (await res.json()).syncedDates || {};
+    const done = new Set();
+    for (const p of platforms) {
+      if ((synced[p] || []).includes(targetDate)) done.add(p);
+    }
+    return done;
+  } catch {
+    return new Set();
+  }
+}
+
 // ─── PocRunner 플랫폼별 옵션 ───
 function pocOptionsFor(platform, storeId) {
   const opts = {};
@@ -207,15 +230,26 @@ async function runAll({ dryRun }) {
 
   const summary = [];
   for (const store of cfg.stores) {
-    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — ${store.platforms.join(', ')} ━━━`);
+    const platforms = (store.platforms || []).filter((p) => DATE_PLATFORMS.includes(p));
+    // 이미 수집된 플랫폼은 skip — 미수집만 (재)수집. 30분 반복 실행 대비.
+    const done = await fetchSyncedPlatforms(cfg.serverUrl, store.storeId, platforms, targetDate, token);
+    const remaining = platforms.filter((p) => !done.has(p));
+
+    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 대상: ${remaining.length ? remaining.join(', ') : '없음 (이미 수집 완료)'} ━━━`);
+    if (done.size) log(`  ✓ 이미 수집됨: ${[...done].join(', ')}`);
+
+    if (remaining.length === 0) {
+      summary.push({ store: store.name, code: 0, skipped: true });
+      continue;
+    }
+
     if (dryRun) {
       try {
         const creds = await fetchStoreCredentials(cfg.serverUrl, store.storeId, token);
-        const lines = store.platforms.map((p) => {
+        remaining.forEach((p) => {
           const c = creds[p];
-          return c && c.id && c.pw ? `  · ${p}: 수집 예정 (loginId=${c.id})` : `  · ${p}: ⏭ 인증정보 없음`;
+          log(c && c.id && c.pw ? `  · ${p}: 수집 예정 (loginId=${c.id})` : `  · ${p}: ⏭ 인증정보 없음`);
         });
-        lines.forEach(log);
         summary.push({ store: store.name, code: 0 });
       } catch (err) {
         log(`  ❌ 계정 조회 실패 — ${err.message}`);
@@ -223,13 +257,18 @@ async function runAll({ dryRun }) {
       }
       continue;
     }
-    const child = spawnStoreChild(store, { serverUrl: cfg.serverUrl, targetDate, token });
+
+    const child = spawnStoreChild({ ...store, platforms: remaining }, { serverUrl: cfg.serverUrl, targetDate, token });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
   }
 
   log('\n──────────── 요약 ────────────');
-  summary.forEach((s) => log(`  ${s.code === 0 ? '✅' : '❌'} ${s.store}${s.code === 0 ? '' : ` (exit ${s.code})`}`));
+  summary.forEach((s) => {
+    const mark = s.skipped ? '✓' : (s.code === 0 ? '✅' : '❌');
+    const note = s.skipped ? ' (이미 완료)' : (s.code === 0 ? '' : ` (exit ${s.code})`);
+    log(`  ${mark} ${s.store}${note}`);
+  });
   const anyFail = summary.some((s) => s.code !== 0);
   log(`\n${anyFail ? '⚠️  일부 매장 실패' : '🎉 전 매장 완료'}  (로그: ${LOG_FILE})`);
   process.exit(anyFail ? 1 : 0);
