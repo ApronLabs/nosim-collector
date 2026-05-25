@@ -56,6 +56,10 @@ let scheduler = null;
 let Store = null;
 let store = null;
 
+// 대시보드(상황판) 모드: --dashboard 인자 또는 DASHBOARD_MODE=1 환경변수.
+// 켜지면 .env 의 노심 계정으로 자동 로그인 → 매장선택 없이 바로 수집 현황 보드.
+const DASHBOARD_MODE = process.argv.includes('--dashboard') || process.env.DASHBOARD_MODE === '1';
+
 function initStore() {
   if (!Store) {
     Store = require('electron-store');
@@ -383,41 +387,64 @@ function stopSerialPolling() {
 // ========================================
 
 // IPC: 로그인
-ipcMain.handle('login', async (event, { email, password }) => {
+// 로그인 코어 — IPC(login)와 자동 로그인(autoLogin)이 공유.
+async function performLogin(email, password) {
   const s = initStore();
   const serverUrl = s.get('serverUrl');
-  try {
-    const response = await fetch(`${serverUrl}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+  const response = await fetch(`${serverUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return { success: false, message: data.error || '로그인 실패' };
+  }
+  const setCookie = response.headers.getSetCookie?.() || [];
+  let sessionToken = null;
+  for (const cookie of setCookie) {
+    const match = cookie.match(/session-token=([^;]+)/);
+    if (match) {
+      sessionToken = match[1];
+      break;
+    }
+  }
+  if (sessionToken) {
+    await session.defaultSession.cookies.set({
+      url: serverUrl,
+      name: 'session-token',
+      value: sessionToken,
+      path: '/',
     });
-    const data = await response.json();
-    if (!response.ok) {
-      return { success: false, message: data.error || '로그인 실패' };
-    }
-    const setCookie = response.headers.getSetCookie?.() || [];
-    let sessionToken = null;
-    for (const cookie of setCookie) {
-      const match = cookie.match(/session-token=([^;]+)/);
-      if (match) {
-        sessionToken = match[1];
-        break;
-      }
-    }
-    if (sessionToken) {
-      await session.defaultSession.cookies.set({
-        url: serverUrl,
-        name: 'session-token',
-        value: sessionToken,
-        path: '/',
-      });
-    }
-    return { success: true, user: data.user, token: sessionToken };
+  }
+  return { success: true, user: data.user, token: sessionToken };
+}
+
+// 대시보드 모드 자동 로그인 — .env 의 NOSIM_EMAIL/NOSIM_PASSWORD 사용
+async function autoLogin() {
+  const email = process.env.NOSIM_EMAIL;
+  const password = process.env.NOSIM_PASSWORD;
+  if (!email || !password) {
+    return { success: false, message: '.env 에 NOSIM_EMAIL / NOSIM_PASSWORD 가 필요합니다.' };
+  }
+  try {
+    return await performLogin(email, password);
+  } catch (err) {
+    return { success: false, message: '서버 연결 실패: ' + err.message };
+  }
+}
+
+ipcMain.handle('login', async (event, { email, password }) => {
+  try {
+    return await performLogin(email, password);
   } catch (err) {
     return { success: false, message: '서버 연결 실패: ' + err.message };
   }
 });
+
+// 대시보드 모드 여부 + 재로그인 (renderer 가 세션 만료 시 호출)
+ipcMain.handle('get-dashboard-mode', () => DASHBOARD_MODE);
+ipcMain.handle('dashboard-relogin', async () => autoLogin());
 
 // IPC: 매장 목록 조회
 ipcMain.handle('get-stores', async () => {
@@ -1004,6 +1031,27 @@ app.whenReady().then(async () => {
   createWindow();
   initGlobalKeyListener();
   startSerialPolling();
+
+  // 대시보드(상황판) 모드: 자동 로그인 → 매장선택 없이 바로 수집 현황 보드.
+  // 세션 유지를 위해 6시간마다 재로그인.
+  if (DASHBOARD_MODE) {
+    console.log('  [DASHBOARD] 상황판 모드 — 자동 로그인 시도');
+    mainWindow.setSize(1320, 950);
+    mainWindow.center();
+    autoLogin().then((r) => {
+      if (r.success) {
+        console.log('  [DASHBOARD] 자동 로그인 성공 → 수집 현황 보드');
+        mainWindow.loadFile(path.join(__dirname, 'renderer', 'crawler.html'));
+      } else {
+        console.error('  [DASHBOARD] 자동 로그인 실패:', r.message, '— 로그인 화면 유지');
+      }
+    });
+    setInterval(() => {
+      autoLogin().then((r) => {
+        if (!r.success) console.error('  [DASHBOARD] 주기적 재로그인 실패:', r.message);
+      });
+    }, 6 * 60 * 60 * 1000);
+  }
 
   // 자동 크롤링 스케줄러
   const schedulerStore = initStore();
