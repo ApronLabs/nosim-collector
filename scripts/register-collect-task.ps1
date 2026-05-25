@@ -19,6 +19,8 @@
 
 param(
   [string]$Time = "11:00",
+  [int]$EveryMinutes = 30,
+  [int]$ForHours = 6,
   [string]$TaskName = "NosimSalesCollect"
 )
 
@@ -36,6 +38,12 @@ if (-not (Test-Path $script)) { throw "collect script not found: $script" }
 
 $action  = New-ScheduledTaskAction -Execute $node -Argument "`"$script`"" -WorkingDirectory $repo
 $trigger = New-ScheduledTaskTrigger -Daily -At $Time
+# Repeat every $EveryMinutes for $ForHours so a store that failed (captcha/network)
+# gets retried automatically. Each run skips stores already collected (sync-status),
+# so once everything is done the repeats are near-instant no-ops.
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $Time `
+  -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes) `
+  -RepetitionDuration (New-TimeSpan -Hours $ForHours)).Repetition
 $settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
   -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
@@ -47,7 +55,8 @@ Register-ScheduledTask -TaskName $TaskName `
   -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
 
 Write-Host "[OK] Scheduled task '$TaskName' registered" -ForegroundColor Green
-Write-Host "     Daily at $Time, in logged-on user ($env:USERNAME) session" -ForegroundColor Green
+Write-Host "     Daily from $Time, repeat every $EveryMinutes min for $ForHours h (retries un-collected stores)" -ForegroundColor Green
+Write-Host "     in logged-on user ($env:USERNAME) session" -ForegroundColor Green
 Write-Host "     node:   $node"
 Write-Host "     script: $script"
 Write-Host ""

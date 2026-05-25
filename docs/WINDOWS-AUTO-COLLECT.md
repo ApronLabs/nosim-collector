@@ -99,11 +99,14 @@ node scripts\collect-stores.js
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1
-# 시각 바꾸려면:
-powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time "11:00"
+# 시각/반복 바꾸려면:
+powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time "11:00" -EveryMinutes 30 -ForHours 6
 ```
 
-- 매일 지정 시각(기본 **11:00**)에 로그온 사용자 세션에서 수집 실행.
+- 매일 **11:00 부터 30분 간격으로 6시간(11~17시) 반복** 실행 (로그온 사용자 세션).
+- **미수집 매장만 재시도**: 매 실행 때 `sync-status` 로 이미 수집된 매장×플랫폼은 skip,
+  실패해 안 된 것만 (재)수집. 다 되면 이후 반복은 즉시 no-op(창도 안 뜸). → 11시 한 매장이
+  캡차/네트워크로 실패해도 30분 뒤 그 매장만 자동 재시도.
 - 작업 이름은 **`NosimSalesCollect`** (영문). PowerShell 5.1 이 BOM 없는 스크립트를 한글 코드페이지로 읽어 한글 작업이름이 깨지면 `0x8007007B` 로 등록 실패 → 이름은 ASCII 로 고정.
 - PC 가 그 시각에 꺼져 있었으면 켜진 직후 자동 실행(`StartWhenAvailable`).
 - 바로 테스트: `Start-ScheduledTask -TaskName "NosimSalesCollect"`
