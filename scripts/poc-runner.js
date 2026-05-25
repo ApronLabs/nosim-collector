@@ -31,8 +31,16 @@ class PocRunner {
     //   한 달 세션 유지가 의도된 정상 흐름인데 매번 임시 dir 이라 매일 로그인 필요했음.
     // 둘 다 전용 stable 디렉토리 (~/.poc-<platform>-session) 로 쿠키/세션 지속.
     // 다른 플랫폼은 자체 자동 로그인 스크립트가 있어 매번 fresh 임시 dir 로 격리.
+    //
+    // options.userDataDir: 호출자가 user-data-dir 을 직접 지정 (멀티매장 수집기용).
+    //   한 PC 에서 여러 매장의 baemin 을 돌릴 때 매장별 dir 로 격리해야 함 —
+    //   공유 시 첫 매장 세션이 재사용돼 잘못된 shopId 반환(2026-05-16 발견).
+    //   외부 지정 dir 은 항상 보존(삭제 X) 한다.
     this._useStableDir = ['sikbom', 'baemin'].includes(this.platform);
-    if (this._useStableDir) {
+    if (options.userDataDir) {
+      this._tmpDir = options.userDataDir;
+      this._useStableDir = true;
+    } else if (this._useStableDir) {
       this._tmpDir = path.join(os.homedir(), `.poc-${this.platform}-session`);
     } else {
       this._tmpDir = path.join(os.tmpdir(), `poc-${this.platform}-${Date.now()}`);
@@ -63,6 +71,10 @@ class PocRunner {
     // sikbom: 스케줄러가 생성한 runId를 전달해서 trace 연속성 확보
     if (options.sikbomRunId) {
       args.push(`--runId=${options.sikbomRunId}`);
+    }
+    // coupangeats: Akamai 봇감지 회피 위해 창을 띄워야 함(--show). 호출자가 옵션으로 지시.
+    if (options.show) {
+      args.push('--show');
     }
 
     log(`spawn: ${electronPath}`);
