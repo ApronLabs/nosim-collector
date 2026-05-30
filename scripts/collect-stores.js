@@ -3,7 +3,10 @@
 //
 // 설계
 // - 작업 스케줄러가 이 스크립트(부모)를 매일 1회 실행.
-// - 부모는 노심에 1회 로그인 → 세션 토큰 확보 → config 의 매장을 "하나씩 순차" 처리.
+// - 부모는 노심에 1회 로그인 → 세션 토큰 확보 → GET /api/stores 로 노심 전체 매장을
+//   동적으로 받아 "하나씩 순차" 처리. 매장당 등록된 배달/POS 계정만 골라 수집하고,
+//   배달/POS 계정이 없는 매장은 자동 skip. → 노심 UI 에서 계정만 추가하면 자동 반영
+//   (config 에 매장·플랫폼 하드코딩 불필요). config.stores 가 있으면 그 매장만 override.
 // - 매장마다 독립 자식 프로세스(node collect-stores.js --store=...)를 띄워 OS 레벨 고립.
 //   → 한 매장 수집이 다음 매장에 영향(쿠키/상태 잔존)을 못 줌.
 // - 자식은 자기 매장의 플랫폼 계정을 노심 API 로 fetch → 플랫폼을 순차 수집(PocRunner).
@@ -12,7 +15,7 @@
 //   - coupangeats: --show 필요(Akamai 봇감지 회피). 화면 있는 로그온 세션에서만 통과.
 //
 // 사용
-//   node scripts/collect-stores.js                 # KST 어제, config 전체 매장
+//   node scripts/collect-stores.js                 # KST 어제, 노심 전체 매장(동적)
 //   node scripts/collect-stores.js --targetDate=2026-05-24
 //   node scripts/collect-stores.js --dry-run       # 로그인+계정조회만, electron 안 띄움
 //   node scripts/collect-stores.js --store=<uuid> --name=.. --platforms=a,b --targetDate=.. \
@@ -86,6 +89,17 @@ async function nosimLogin(serverUrl, email, password) {
     if (m) return m[1];
   }
   throw new Error('응답에서 session-token 을 찾지 못함');
+}
+
+// 노심 전체 매장 목록 조회 (system_admin 계정으로 호출 시 전체 매장 반환).
+// 수집 대상 매장을 config 하드코딩 대신 노심에서 동적으로 가져온다.
+async function fetchCollectStores(serverUrl, token) {
+  const res = await fetch(`${serverUrl}/api/stores`, { headers: { Cookie: `session-token=${token}` } });
+  if (!res.ok) throw new Error(`매장 목록 조회 실패 (HTTP ${res.status})`);
+  const data = await res.json();
+  return (data.data || [])
+    .filter((s) => s && s.id)
+    .map((s) => ({ storeId: s.id, name: s.name || String(s.id).slice(0, 8) }));
 }
 
 async function fetchStoreCredentials(serverUrl, storeId, token) {
@@ -220,8 +234,7 @@ async function runAll({ dryRun }) {
   }
 
   log('════════════════════════════════════════');
-  log(`  매장별 매출 자동 수집  (target=${targetDate}${isToday ? ' [당일 실시간]' : ''}, KST ${kstNow()})`);
-  log(`  대상 매장 ${cfg.stores.length}곳${dryRun ? '  [DRY-RUN]' : ''}`);
+  log(`  매장별 매출 자동 수집  (target=${targetDate}${isToday ? ' [당일 실시간]' : ''}, KST ${kstNow()})${dryRun ? '  [DRY-RUN]' : ''}`);
   log('════════════════════════════════════════');
 
   let token;
@@ -233,15 +246,46 @@ async function runAll({ dryRun }) {
     process.exit(2);
   }
 
+  // 수집 대상 매장 = 노심 전체 매장 (동적). UI 에서 배달/POS 계정만 추가하면 자동 포함.
+  // config.stores 가 있으면 그 매장만 대상 (긴급/테스트용 override).
+  let stores;
+  try {
+    stores = await fetchCollectStores(cfg.serverUrl, token);
+  } catch (err) {
+    log(`❌ ${err.message}`);
+    process.exit(2);
+  }
+  if (Array.isArray(cfg.stores) && cfg.stores.length) {
+    const allow = new Set(cfg.stores.map((s) => s.storeId));
+    stores = stores.filter((s) => allow.has(s.storeId));
+    log(`  config override 적용 — 대상 ${stores.length}곳`);
+  }
+  log(`  노심 매장 ${stores.length}곳 점검 (배달/POS 계정 등록된 매장만 수집)`);
+
   const summary = [];
-  for (const store of cfg.stores) {
-    const platforms = (store.platforms || []).filter((p) => DATE_PLATFORMS.includes(p));
+  const skippedNoAccount = [];
+  for (const store of stores) {
+    // 매장에 노심 UI 로 등록된 배달/POS 계정만 동적으로 수집 (config 하드코딩 제거).
+    let creds;
+    try {
+      creds = await fetchStoreCredentials(cfg.serverUrl, store.storeId, token);
+    } catch (err) {
+      log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) ━━━\n  ❌ 계정 조회 실패 — ${err.message}`);
+      summary.push({ store: store.name, code: 1 });
+      continue;
+    }
+    const platforms = Object.keys(creds).filter((p) => DATE_PLATFORMS.includes(p) && creds[p].id && creds[p].pw);
+    if (platforms.length === 0) {
+      skippedNoAccount.push(store.name);
+      continue;
+    }
+
     // 당일(오늘)은 새 주문 흡수 위해 항상 재수집(skip 안 함, 중복은 노심 upsert 가 방지).
     // 과거 날짜는 이미 수집된 플랫폼 skip — 미수집만 재시도(30분 반복 대비).
     const done = isToday ? new Set() : await fetchSyncedPlatforms(cfg.serverUrl, store.storeId, platforms, targetDate, token);
     const remaining = platforms.filter((p) => !done.has(p));
 
-    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 대상: ${remaining.length ? remaining.join(', ') : '없음 (이미 수집 완료)'} ━━━`);
+    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 등록: ${platforms.join(', ')} / 대상: ${remaining.length ? remaining.join(', ') : '없음 (이미 수집 완료)'} ━━━`);
     if (done.size) log(`  ✓ 이미 수집됨: ${[...done].join(', ')}`);
 
     if (remaining.length === 0) {
@@ -250,23 +294,18 @@ async function runAll({ dryRun }) {
     }
 
     if (dryRun) {
-      try {
-        const creds = await fetchStoreCredentials(cfg.serverUrl, store.storeId, token);
-        remaining.forEach((p) => {
-          const c = creds[p];
-          log(c && c.id && c.pw ? `  · ${p}: 수집 예정 (loginId=${c.id})` : `  · ${p}: ⏭ 인증정보 없음`);
-        });
-        summary.push({ store: store.name, code: 0 });
-      } catch (err) {
-        log(`  ❌ 계정 조회 실패 — ${err.message}`);
-        summary.push({ store: store.name, code: 1 });
-      }
+      remaining.forEach((p) => log(`  · ${p}: 수집 예정 (loginId=${creds[p].id})`));
+      summary.push({ store: store.name, code: 0 });
       continue;
     }
 
     const child = spawnStoreChild({ ...store, platforms: remaining }, { serverUrl: cfg.serverUrl, targetDate, token });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
+  }
+
+  if (skippedNoAccount.length) {
+    log(`\n  · 배달/POS 미등록 ${skippedNoAccount.length}곳 skip`);
   }
 
   log('\n──────────── 요약 ────────────');
