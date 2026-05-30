@@ -334,6 +334,27 @@ function nav(url, t=30000) {
 }
 const isLogin = u => u.includes('/login') || u.includes('/signin');
 
+// 로그인 페이지에서 벗어날 때까지 대기 (수동 로그인 통과 감지). baemin 패턴 차용.
+function waitForLoginRedirect(timeoutMs = 180000) {
+  return new Promise(resolve => {
+    if (!isLogin(webView.webContents.getURL())) { resolve(webView.webContents.getURL()); return; }
+    let done = false;
+    const cleanup = () => {
+      if (done) return; done = true; clearInterval(poll); clearTimeout(t);
+      webView.webContents.removeListener('did-navigate', onNav);
+      webView.webContents.removeListener('did-navigate-in-page', onNav);
+    };
+    const t = setTimeout(() => { cleanup(); resolve(webView.webContents.getURL()); }, timeoutMs);
+    const onNav = (_, url) => { if (!isLogin(url)) { cleanup(); resolve(url); } };
+    webView.webContents.on('did-navigate', onNav);
+    webView.webContents.on('did-navigate-in-page', onNav);
+    const poll = setInterval(() => {
+      const u = webView.webContents.getURL();
+      if (!isLogin(u)) { cleanup(); resolve(u); }
+    }, 1000);
+  });
+}
+
 /* ─────────── 매장별 수집 (XHR API) ─────────── */
 async function collectStore(name, id, dr) {
   log(`\n===== ${name} (${id}) =====`);
@@ -540,31 +561,48 @@ app.whenReady().then(async () => {
 
   try {
     const ses = webView.webContents.session;
-    await ses.clearStorageData(); await ses.clearCache();
+    // 세션 영속 — clearStorageData 제거. 매장별 user-data-dir 로 계정 격리(공유 시 다른
+    // 매장 계정 세션 오염 방지, baemin 과 동일 패턴). 살아있는 세션은 재사용해 봇감지 회피.
     const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
     ses.setUserAgent(ua); webView.webContents.setUserAgent(ua);
 
-    // ── 1) 로그인 ──
-    emit('status', { msg: '쿠팡이츠 로그인 중...' });
-    log('1) 로그인...');
+    // ── 1) 로그인 (세션 우선) ──
+    emit('status', { msg: '쿠팡이츠 세션 확인 중...' });
+    log('1) 세션 확인...');
     await nav('https://store.coupangeats.com/merchant/login');
     log('   Akamai 10초...');
     await sleep(10000);
-    const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
-    if (!hf.i || !hf.p) { await sleep(5000);
-      const r = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
-      if (!r.i || !r.p) throw new Error('로그인 폼 없음');
-    }
-    const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
-    if (!lr.success) throw new Error(`로그인 실패: ${lr.error}`);
-    log('   로그인 응답 10초...');
-    await sleep(10000);
     let url = webView.webContents.getURL();
-    log(`   -> ${url}`);
+
     if (isLogin(url)) {
-      emit('error', { error: '쿠팡이츠 로그인 실패' });
-      throw new Error('로그인 잔류');
+      // 세션 없음/만료 → 로그인 필요
+      log('   세션 없음 — 로그인 시도');
+      const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
+      if (!hf.i || !hf.p) { await sleep(5000);
+        const r = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
+        if (!r.i || !r.p) throw new Error('로그인 폼 없음');
+      }
+      // a) 자동 로그인 시도 (봇감지에 걸릴 수 있음)
+      const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
+      if (lr.success) { log('   자동 로그인 제출 — 응답 10초...'); await sleep(10000); url = webView.webContents.getURL(); }
+
+      // b) 자동 실패 → 수동 로그인 대기 (--show 일 때만; 통과 후 세션이 user-data-dir 에 저장됨)
+      if (isLogin(url)) {
+        if (SHOW) {
+          emit('status', { msg: '쿠팡이츠 자동 로그인 실패 — 창에서 직접 로그인해 주세요 (180초 대기)' });
+          log('   자동 로그인 실패(봇감지 추정) — 수동 로그인 대기 180초');
+          url = await waitForLoginRedirect(180000);
+        }
+        if (isLogin(url)) {
+          emit('error', { error: '쿠팡이츠 로그인 실패 — 최초 1회 --show 로 수동 로그인 후 세션 저장 필요' });
+          throw new Error('로그인 잔류');
+        }
+        log('   수동 로그인 성공 — 세션 저장됨 (이후 자동 재사용)');
+      }
+    } else {
+      log('   기존 세션 재사용 (로그인 스킵)');
     }
+    log(`   -> ${url}`);
     log('   로그인 완료');
 
     const defId = (url.match(/\/(\d+)$/) || [])[1] || '';

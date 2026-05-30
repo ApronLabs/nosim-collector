@@ -145,7 +145,10 @@ function pocOptionsFor(platform, storeId) {
     opts.userDataDir = path.join(os.homedir(), `.poc-baemin-session-${String(storeId).slice(0, 8)}`);
   }
   if (platform === 'coupangeats') {
-    opts.show = true; // Akamai 회피
+    // 매장별 stable dir — 세션 영속 + 계정 교차오염 방지(baemin 과 동일).
+    // 살아있는 세션 재사용으로 봇감지 회피. 세션 만료 시 --show 창에서 1회 수동 로그인.
+    opts.userDataDir = path.join(os.homedir(), `.poc-coupangeats-session-${String(storeId).slice(0, 8)}`);
+    opts.show = true; // Akamai 회피 + 세션 만료 시 수동 로그인 창
   }
   return opts;
 }
