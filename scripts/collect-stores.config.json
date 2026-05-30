@@ -1,22 +1,5 @@
 {
   "serverUrl": "https://no-sim.co.kr",
   "collectTime": "11:00",
-  "_comment": "매일 자동 수집 대상 매장×플랫폼. 매장 추가/플랫폼 변경은 여기서만. storeId 는 nosim_db stores.id. 비밀번호는 여기 적지 않음 — 노심 API 로 매번 복호화 fetch.",
-  "stores": [
-    {
-      "name": "유신본점",
-      "storeId": "69bc1841-c2b4-4def-98c8-8fa2018b5fa7",
-      "platforms": ["baemin", "yogiyo"]
-    },
-    {
-      "name": "월하화본점",
-      "storeId": "3c11a2d6-f17d-4e30-9e23-1caad66a51b3",
-      "platforms": ["baemin", "okpos"]
-    },
-    {
-      "name": "고기왕김치찜 정릉본점",
-      "storeId": "275da1de-aa34-40f2-baed-3021d6d1184a",
-      "platforms": ["baemin", "yogiyo", "coupangeats", "ddangyoyo"]
-    }
-  ]
+  "_comment": "수집 대상 = 노심 전체 매장(동적). 노심 UI 에서 매장별 배달앱/POS 계정만 등록하면 자동 수집됨 — 여기 매장·플랫폼 적을 필요 없음. 배달/POS 계정 없는 매장은 자동 skip. 특정 매장만 강제하려면 stores: [{\"storeId\":\"...\",\"name\":\"...\"}] 추가(override). 비밀번호는 여기 적지 않음 — 노심 API 로 매번 복호화 fetch."
 }
