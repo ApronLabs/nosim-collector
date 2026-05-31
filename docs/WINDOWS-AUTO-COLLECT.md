@@ -3,7 +3,7 @@
 무인 사무실 PC 가 **매일 정해진 시각에 본점 3곳의 전날 매출**을 자동 수집하도록 세팅하는 가이드.
 
 - **수집(실행)**: 헤드리스 스크립트 `scripts/collect-stores.js` 가 매장을 **하나씩 순차**(매장마다 독립 자식 프로세스)로 돌림 → 절대 안 꼬임.
-- **자동화**: Windows **작업 스케줄러**가 매일 1회 위 스크립트를 호출.
+- **자동화**: Windows **작업 스케줄러**가 30분마다(24시간) 위 스크립트를 호출 — 매번 매장별 현재 영업일을 재수집.
 - **표시(대시보드)**: 다음 PR 에서 Electron 앱을 상태판으로 변경 예정. (이 문서 범위 아님)
 
 대상 매장·플랫폼은 `scripts/collect-stores.config.json` 에 정의 — 유신본점(baemin·yogiyo), 월하화본점(baemin·okpos), 고기왕김치찜 정릉본점(baemin·yogiyo·coupangeats·ddangyoyo).
@@ -97,29 +97,32 @@ node scripts\collect-stores.js
 
 ## 4. 작업 스케줄러 등록
 
-**작업 2개**를 한 번에 등록 — `scripts\register-tasks.cmd` 더블클릭 (또는 cmd 실행):
+**작업 1개**를 등록 — `scripts\register-tasks.cmd` 더블클릭 (또는 cmd 실행):
 
-| 작업 | 대상 | 주기 | skip |
+| 작업 | 대상 | 주기 | 방식 |
 |---|---|---|---|
-| `NosimSalesCollect` | **어제** (백필/마무리) | 11:00~17:00, 30분 간격 | 이미 수집된 건 skip, 미수집만 재시도 |
-| `NosimSalesCollectToday` | **오늘** (실시간) | 10:00~다음날 04:00, 30분 간격 | **skip 안 함** — 매번 재수집해 새 주문 흡수 (중복은 노심 upsert 가 방지) |
+| `NosimSalesCollect` | **매장별 현재 영업일** | **30분마다, 24시간 항상** | 매번 재수집(skip 없음, 중복은 노심 upsert 가 흡수) |
 
 개별 등록/조정:
 ```powershell
-# 어제 백필
-powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time "11:00" -EveryMinutes 30 -ForHours 6
-# 당일 실시간 (10:00부터 18시간 = 04:00 까지)
-powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -TaskName "NosimSalesCollectToday" -ExtraArgs "--today" -Time "10:00" -EveryMinutes 30 -ForHours 18
+powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time "00:00" -EveryMinutes 30 -ForHours 24
 ```
 
-- 매일 **11:00 부터 30분 간격으로 6시간(11~17시) 반복** 실행 (로그온 사용자 세션).
-- **미수집 매장만 재시도**: 매 실행 때 `sync-status` 로 이미 수집된 매장×플랫폼은 skip,
-  실패해 안 된 것만 (재)수집. 다 되면 이후 반복은 즉시 no-op(창도 안 뜸). → 11시 한 매장이
-  캡차/네트워크로 실패해도 30분 뒤 그 매장만 자동 재시도.
+### 핵심: 매장별 영업일(closingTime) 기준 수집
+
+`collect-stores.js` 는 매 실행 때 **매장마다 `closing_time` 으로 cutoff 를 구해 "지금이 속한 영업일"을 계산**해 그 날짜로 수집한다 (노심 `lib/business-day.ts` 와 동일 규약).
+
+- **자정 이후 마감**(예: 월하화 02:00) → `cutoff = 3`. KST 03:00 전까지는 "현재 영업일 = 전날". 즉 **자정~03:00 에도 어제 영업일로 계속 수집** → 마감(02:00) 후에도 30분 틱이 한 번 더 돌아 OKPOS 영업일 매출을 **완전값으로 자연 채움**. (별도 finalize 작업 불필요.)
+- **자정 이전 마감 / 미설정** → `cutoff = 0`, KST 달력일 그대로.
+- 시간 윈도우 없음 — **항상 30분마다**. 매번 현재 영업일을 재수집(덮어쓰기)하므로 새 주문 흡수 + 마감 후 완전화가 같은 루프에서 처리됨.
+
+> 왜 OKPOS 는 이렇게밖에 못 하나: OKPOS 일매출은 **영수증별 시각 없이 영업일 합계 1줄**로만 들어온다(노심 `pos_daily_sales`). 노심 코드로 시간대 재귀속이 불가 → **수집 시점(어느 영업일을 언제 긁느냐)이 곧 정확도**다. 배달(배민/요기요/…)은 주문별 `ordered_at` 이 있어 노심이 영업일을 알아서 재귀속하므로 영향 없음.
+
 - 작업 이름은 **`NosimSalesCollect`** (영문). PowerShell 5.1 이 BOM 없는 스크립트를 한글 코드페이지로 읽어 한글 작업이름이 깨지면 `0x8007007B` 로 등록 실패 → 이름은 ASCII 로 고정.
-- PC 가 그 시각에 꺼져 있었으면 켜진 직후 자동 실행(`StartWhenAvailable`).
+- PC 가 꺼져 있었으면 켜진 직후 자동 실행(`StartWhenAvailable`).
 - 바로 테스트: `Start-ScheduledTask -TaskName "NosimSalesCollect"`
 - 해제: `Unregister-ScheduledTask -TaskName "NosimSalesCollect" -Confirm:$false`
+- (구버전에서 올라온 경우) 이전 `NosimSalesCollectToday` / `NosimSalesCollectFinalize` 작업이 있으면 제거: `Unregister-ScheduledTask -TaskName "NosimSalesCollectToday" -Confirm:$false`
 
 ---
 
