@@ -2,7 +2,7 @@
 // 매장별 매출 자동 수집 오케스트레이터 (무인 PC + 작업 스케줄러용)
 //
 // 설계
-// - 작업 스케줄러가 이 스크립트(부모)를 매일 1회 실행.
+// - 작업 스케줄러가 이 스크립트(부모)를 30분마다(24시간) 실행. 매장별 영업일 기준 현재 영업일을 매번 재수집.
 // - 부모는 노심에 1회 로그인 → 세션 토큰 확보 → GET /api/stores 로 노심 전체 매장을
 //   동적으로 받아 "하나씩 순차" 처리. 매장당 등록된 배달/POS 계정만 골라 수집하고,
 //   배달/POS 계정이 없는 매장은 자동 skip. → 노심 UI 에서 계정만 추가하면 자동 반영
@@ -15,8 +15,8 @@
 //   - coupangeats: --show 필요(Akamai 봇감지 회피). 화면 있는 로그온 세션에서만 통과.
 //
 // 사용
-//   node scripts/collect-stores.js                 # KST 어제, 노심 전체 매장(동적)
-//   node scripts/collect-stores.js --targetDate=2026-05-24
+//   node scripts/collect-stores.js                 # 매장별 영업일(현재) 자동 수집, 노심 전체 매장(동적)
+//   node scripts/collect-stores.js --targetDate=2026-05-24   # 전 매장 그 날짜로 강제(수동 백필)
 //   node scripts/collect-stores.js --dry-run       # 로그인+계정조회만, electron 안 띄움
 //   node scripts/collect-stores.js --store=<uuid> --name=.. --platforms=a,b --targetDate=.. \
 //        --server=.. --sessionToken=..             # (내부) 부모가 자식으로 호출
@@ -62,6 +62,25 @@ function kstYesterday() {
 function kstToday() {
   return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
 }
+// 영업일 cutoff(시) — 노심 lib/business-day.ts 와 동일 규약.
+//   - 자정 이후 마감(h < 12, 예 "02:00")  → cutoff = h + 1  (02:00 → 3: 마감 후 1시간 여유까지 같은 영업일)
+//   - 자정 이전 마감(h >= 12) / 미설정      → cutoff = 0  (KST 달력일 그대로)
+// closingStr: "/api/stores" 의 closing_time ("HH:MM" 또는 null).
+function getCutoffHour(closingStr) {
+  if (!closingStr) return 0;
+  const h = parseInt(String(closingStr).split(':')[0], 10);
+  if (!Number.isFinite(h)) return 0;
+  return h < 12 ? h + 1 : 0;
+}
+// 지금(now) 이 속한 매장 영업일을 YYYY-MM-DD(KST)로. cutoff 전이면 전날 영업일.
+// 예) 월하화(cutoff 3): KST 5/31 02:30 → "2026-05-30" (마감 02:00 후에도 03:00까지 5/30 으로 수집).
+function businessDateStr(now, cutoffHour) {
+  const kst = new Date(now.getTime() + 9 * 3600 * 1000);
+  if (cutoffHour > 0 && kst.getUTCHours() < cutoffHour) {
+    kst.setUTCDate(kst.getUTCDate() - 1);
+  }
+  return kst.toISOString().slice(0, 10);
+}
 function kstNow() {
   return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
 }
@@ -99,7 +118,7 @@ async function fetchCollectStores(serverUrl, token) {
   const data = await res.json();
   return (data.data || [])
     .filter((s) => s && s.id)
-    .map((s) => ({ storeId: s.id, name: s.name || String(s.id).slice(0, 8) }));
+    .map((s) => ({ storeId: s.id, name: s.name || String(s.id).slice(0, 8), closingTime: s.closing_time || null }));
 }
 
 async function fetchStoreCredentials(serverUrl, storeId, token) {
@@ -114,28 +133,8 @@ async function fetchStoreCredentials(serverUrl, storeId, token) {
   return creds;
 }
 
-// sync-status 가 인정하는 날짜기반 플랫폼
+// 날짜기반(영업일 합계/주문) 수집 플랫폼
 const DATE_PLATFORMS = ['baemin', 'yogiyo', 'coupangeats', 'ddangyoyo', 'okpos'];
-
-// targetDate 기준 이미 수집 완료된 플랫폼 Set 반환 (sync-status).
-// 실패 시 빈 Set → 전부 수집 시도(안전). 30분 반복 실행 시 미수집만 골라내는 데 사용.
-async function fetchSyncedPlatforms(serverUrl, storeId, platforms, targetDate, token) {
-  if (!platforms.length) return new Set();
-  const url = `${serverUrl}/api/stores/${encodeURIComponent(storeId)}/crawler/sync-status`
-    + `?sources=${platforms.join(',')}&startDate=${targetDate}&endDate=${targetDate}`;
-  try {
-    const res = await fetch(url, { headers: { Cookie: `session-token=${token}` } });
-    if (!res.ok) return new Set();
-    const synced = (await res.json()).syncedDates || {};
-    const done = new Set();
-    for (const p of platforms) {
-      if ((synced[p] || []).includes(targetDate)) done.add(p);
-    }
-    return done;
-  } catch {
-    return new Set();
-  }
-}
 
 // ─── PocRunner 플랫폼별 옵션 ───
 function pocOptionsFor(platform, storeId) {
@@ -224,10 +223,13 @@ function waitExit(child) {
 
 async function runAll({ dryRun }) {
   const cfg = loadConfig();
-  // --today: 당일(오늘) 실시간 수집. 없으면 어제(백필).
-  const targetDate = getArg('targetDate') || (hasFlag('today') ? kstToday() : kstYesterday());
-  const isToday = targetDate === kstToday();
-  setLogFile(targetDate);
+  // 매장별 영업일(closingTime cutoff) 기준으로 수집. 시간 윈도우 없이 30분마다 항상 "현재 영업일"을 재수집한다.
+  // 새벽 마감 매장(월하화 02:00→cutoff 3)은 자정~03:00 에도 현재 영업일=전날 이라 마감 후에도 한 번 더
+  // 수집돼 자연히 완전값으로 채워진다(별도 finalize 불필요). 중복/재수집은 노심 upsert 가 흡수.
+  // --targetDate=YYYY-MM-DD 를 주면 전 매장을 그 날짜로 강제(수동 백필).
+  const manualDate = getArg('targetDate') || null;
+  const now = new Date();
+  setLogFile(kstToday()); // 로그는 실행일(KST) 기준 1개 파일
 
   const email = process.env.NOSIM_EMAIL;
   const password = process.env.NOSIM_PASSWORD;
@@ -237,7 +239,7 @@ async function runAll({ dryRun }) {
   }
 
   log('════════════════════════════════════════');
-  log(`  매장별 매출 자동 수집  (target=${targetDate}${isToday ? ' [당일 실시간]' : ''}, KST ${kstNow()})${dryRun ? '  [DRY-RUN]' : ''}`);
+  log(`  매장별 매출 자동 수집  (${manualDate ? `target=${manualDate} [수동 백필]` : '매장별 영업일 자동'}, KST ${kstNow()})${dryRun ? '  [DRY-RUN]' : ''}`);
   log('════════════════════════════════════════');
 
   let token;
@@ -283,26 +285,22 @@ async function runAll({ dryRun }) {
       continue;
     }
 
-    // 당일(오늘)은 새 주문 흡수 위해 항상 재수집(skip 안 함, 중복은 노심 upsert 가 방지).
-    // 과거 날짜는 이미 수집된 플랫폼 skip — 미수집만 재시도(30분 반복 대비).
-    const done = isToday ? new Set() : await fetchSyncedPlatforms(cfg.serverUrl, store.storeId, platforms, targetDate, token);
-    const remaining = platforms.filter((p) => !done.has(p));
+    // 매장 영업일 기준 targetDate (수동 --targetDate 있으면 그 날짜로 강제 백필).
+    const cutoffHour = getCutoffHour(store.closingTime);
+    const targetDate = manualDate || businessDateStr(now, cutoffHour);
 
-    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 등록: ${platforms.join(', ')} / 대상: ${remaining.length ? remaining.join(', ') : '없음 (이미 수집 완료)'} ━━━`);
-    if (done.size) log(`  ✓ 이미 수집됨: ${[...done].join(', ')}`);
-
-    if (remaining.length === 0) {
-      summary.push({ store: store.name, code: 0, skipped: true });
-      continue;
-    }
+    // 시간 윈도우/skip 없이 항상 재수집 — 30분마다 현재 영업일 덮어쓰기(새 주문 흡수 + 마감 후 완전화).
+    // 중복은 노심 upsert 가 방지. 같은 영업일이 마감(cutoff) 직후까지 유지돼 자연히 완전값이 된다.
+    const cutoffNote = cutoffHour ? ` (마감 ${store.closingTime}→cutoff ${cutoffHour}시)` : '';
+    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 영업일 ${targetDate}${cutoffNote} / 수집: ${platforms.join(', ')} ━━━`);
 
     if (dryRun) {
-      remaining.forEach((p) => log(`  · ${p}: 수집 예정 (loginId=${creds[p].id})`));
+      platforms.forEach((p) => log(`  · ${p}: 수집 예정 (loginId=${creds[p].id})`));
       summary.push({ store: store.name, code: 0 });
       continue;
     }
 
-    const child = spawnStoreChild({ ...store, platforms: remaining }, { serverUrl: cfg.serverUrl, targetDate, token });
+    const child = spawnStoreChild({ ...store, platforms }, { serverUrl: cfg.serverUrl, targetDate, token });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
   }
