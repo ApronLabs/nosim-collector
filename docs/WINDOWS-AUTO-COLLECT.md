@@ -122,7 +122,7 @@ powershell -ExecutionPolicy Bypass -File scripts\register-collect-task.ps1 -Time
 - PC 가 꺼져 있었으면 켜진 직후 자동 실행(`StartWhenAvailable`).
 - 바로 테스트: `Start-ScheduledTask -TaskName "NosimSalesCollect"`
 - 해제: `Unregister-ScheduledTask -TaskName "NosimSalesCollect" -Confirm:$false`
-- (구버전에서 올라온 경우) 이전 `NosimSalesCollectToday` / `NosimSalesCollectFinalize` 작업이 있으면 제거: `Unregister-ScheduledTask -TaskName "NosimSalesCollectToday" -Confirm:$false`
+- (구버전에서 올라온 경우) 이전 `NosimSalesCollectToday` / `NosimSalesCollectFinalize` 작업은 **`register-tasks.cmd` 가 자동 제거**한다 — 따로 칠 필요 없음. 더블클릭 한 번이면 정리+재등록 완료.
 
 ---
 
