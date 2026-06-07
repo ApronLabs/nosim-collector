@@ -18,6 +18,7 @@
 //   node scripts/collect-stores.js                 # 매장별 영업일(현재) 자동 수집, 노심 전체 매장(동적)
 //   node scripts/collect-stores.js --targetDate=2026-05-24   # 전 매장 그 날짜로 강제(수동 백필)
 //   node scripts/collect-stores.js --dry-run       # 로그인+계정조회만, electron 안 띄움
+//   node scripts/collect-stores.js --force         # 쿠팡 backoff 쿨다운 무시(재로그인 직후 즉시 재수집)
 //   node scripts/collect-stores.js --store=<uuid> --name=.. --platforms=a,b --targetDate=.. \
 //        --server=.. --sessionToken=..             # (내부) 부모가 자식으로 호출
 //
@@ -32,6 +33,7 @@ const { spawn } = require('child_process');
 try { require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); } catch {}
 
 const PocRunner = require('./poc-runner');
+const cooldown = require('./lib/cooldown');
 
 // ─── 인자 파싱 ───
 function getArg(name) {
@@ -83,6 +85,9 @@ function businessDateStr(now, cutoffHour) {
 }
 function kstNow() {
   return new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+function kstHm(epochMs) {
+  return new Date(epochMs + 9 * 3600 * 1000).toISOString().slice(11, 16);
 }
 
 // ─── config ───
@@ -194,9 +199,30 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
       });
       const orders = sumOrders(r || resultMsg);
       log(`  ✅ ${platform} — ${orders == null ? '완료' : orders + ' orders'}`);
+      // 성공 → 쿨다운 해제 (수동 백필 성공도 세션 정상이므로 자동 재시도 재개).
+      if (cooldown.appliesTo(platform)) {
+        const st = cooldown.loadState();
+        cooldown.recordSuccess(st, storeId, platform);
+        cooldown.saveState(st);
+      }
     } catch (err) {
       hadFailure = true;
       log(`  ❌ ${platform} — ${lastError || err.message}`);
+      // 실패 → 점증 backoff 기록 (쿠팡 등 레이트리밋 민감 플랫폼만). 다음 자동
+      // 실행은 until 전까지 이 플랫폼을 건너뛴다 → Akamai 차단 고착 방지.
+      if (cooldown.appliesTo(platform)) {
+        const st = cooldown.loadState();
+        const reason = lastError || err.message;
+        cooldown.recordFailure(st, storeId, platform, Date.now(), reason);
+        // throttle/봇감지면 IP 전역 쿨다운 → 이번 실행의 다른 매장 쿠팡도 전부 중단(난타 방지).
+        if (cooldown.isThrottleError(reason)) {
+          cooldown.recordFailure(st, cooldown.GLOBAL_STORE, platform, Date.now(), 'throttle');
+          log(`  🛑 ${platform} throttle 감지 — 이번 실행 모든 ${platform} 중단(IP 쿨다운)`);
+        }
+        cooldown.saveState(st);
+        const until = cooldown.coolingUntil(st, storeId, platform, Date.now());
+        if (until) log(`  ⏸ ${platform} 쿨다운 — ${kstHm(until)} KST 이후 재시도`);
+      }
     } finally {
       runner.destroy();
     }
@@ -228,6 +254,8 @@ async function runAll({ dryRun }) {
   // 수집돼 자연히 완전값으로 채워진다(별도 finalize 불필요). 중복/재수집은 노심 upsert 가 흡수.
   // --targetDate=YYYY-MM-DD 를 주면 전 매장을 그 날짜로 강제(수동 백필).
   const manualDate = getArg('targetDate') || null;
+  // 수동 백필(--targetDate)·--force 는 쿨다운 무시 (재로그인 직후 즉시 재수집용).
+  const ignoreCooldown = hasFlag('force') || !!manualDate;
   const now = new Date();
   setLogFile(kstToday()); // 로그는 실행일(KST) 기준 1개 파일
 
@@ -285,6 +313,20 @@ async function runAll({ dryRun }) {
       continue;
     }
 
+    // 쿨다운 필터 — 직전 실패로 backoff 중인 (매장,플랫폼)은 자동 실행에서 건너뛴다.
+    // (쿠팡 등 레이트리밋 민감 플랫폼만 대상. 수동/--force 는 무시.)
+    const cdState = cooldown.loadState();
+    const nowMs = Date.now();
+    const cooling = [];
+    const collectPlatforms = ignoreCooldown ? platforms : platforms.filter((p) => {
+      if (!cooldown.appliesTo(p)) return true;
+      // 전역(IP) 쿨다운 우선 — 직전 매장에서 throttle 났으면 이 매장 쿠팡도 skip.
+      const gUntil = cooldown.coolingUntil(cdState, cooldown.GLOBAL_STORE, p, nowMs);
+      const until = gUntil || cooldown.coolingUntil(cdState, store.storeId, p, nowMs);
+      if (until) { cooling.push(`${p}(재시도 ${kstHm(until)} KST 이후${gUntil ? ', 전역' : ''})`); return false; }
+      return true;
+    });
+
     // 매장 영업일 기준 targetDate (수동 --targetDate 있으면 그 날짜로 강제 백필).
     const cutoffHour = getCutoffHour(store.closingTime);
     const targetDate = manualDate || businessDateStr(now, cutoffHour);
@@ -292,15 +334,22 @@ async function runAll({ dryRun }) {
     // 시간 윈도우/skip 없이 항상 재수집 — 30분마다 현재 영업일 덮어쓰기(새 주문 흡수 + 마감 후 완전화).
     // 중복은 노심 upsert 가 방지. 같은 영업일이 마감(cutoff) 직후까지 유지돼 자연히 완전값이 된다.
     const cutoffNote = cutoffHour ? ` (마감 ${store.closingTime}→cutoff ${cutoffHour}시)` : '';
-    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 영업일 ${targetDate}${cutoffNote} / 수집: ${platforms.join(', ')} ━━━`);
+    log(`\n━━━ ${store.name} (${store.storeId.slice(0, 8)}) — 영업일 ${targetDate}${cutoffNote} / 수집: ${collectPlatforms.join(', ') || '(없음)'} ━━━`);
+    if (cooling.length) log(`  ⏸ 쿨다운 skip: ${cooling.join(', ')}`);
+
+    if (collectPlatforms.length === 0) {
+      // 전부 쿨다운 중 — 이번 실행은 이 매장 건너뜀(요약엔 성공으로 표기, 실패 누적 아님).
+      summary.push({ store: store.name, code: 0, cooling: true });
+      continue;
+    }
 
     if (dryRun) {
-      platforms.forEach((p) => log(`  · ${p}: 수집 예정 (loginId=${creds[p].id})`));
+      collectPlatforms.forEach((p) => log(`  · ${p}: 수집 예정 (loginId=${creds[p].id})`));
       summary.push({ store: store.name, code: 0 });
       continue;
     }
 
-    const child = spawnStoreChild({ ...store, platforms }, { serverUrl: cfg.serverUrl, targetDate, token });
+    const child = spawnStoreChild({ ...store, platforms: collectPlatforms }, { serverUrl: cfg.serverUrl, targetDate, token });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
   }
@@ -311,8 +360,8 @@ async function runAll({ dryRun }) {
 
   log('\n──────────── 요약 ────────────');
   summary.forEach((s) => {
-    const mark = s.skipped ? '✓' : (s.code === 0 ? '✅' : '❌');
-    const note = s.skipped ? ' (이미 완료)' : (s.code === 0 ? '' : ` (exit ${s.code})`);
+    const mark = s.cooling ? '⏸' : s.skipped ? '✓' : (s.code === 0 ? '✅' : '❌');
+    const note = s.cooling ? ' (전부 쿨다운)' : s.skipped ? ' (이미 완료)' : (s.code === 0 ? '' : ` (exit ${s.code})`);
     log(`  ${mark} ${s.store}${note}`);
   });
   const anyFail = summary.some((s) => s.code !== 0);
