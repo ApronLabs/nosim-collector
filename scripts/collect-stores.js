@@ -212,7 +212,13 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
       // 실행은 until 전까지 이 플랫폼을 건너뛴다 → Akamai 차단 고착 방지.
       if (cooldown.appliesTo(platform)) {
         const st = cooldown.loadState();
-        cooldown.recordFailure(st, storeId, platform, Date.now(), lastError || err.message);
+        const reason = lastError || err.message;
+        cooldown.recordFailure(st, storeId, platform, Date.now(), reason);
+        // throttle/봇감지면 IP 전역 쿨다운 → 이번 실행의 다른 매장 쿠팡도 전부 중단(난타 방지).
+        if (cooldown.isThrottleError(reason)) {
+          cooldown.recordFailure(st, cooldown.GLOBAL_STORE, platform, Date.now(), 'throttle');
+          log(`  🛑 ${platform} throttle 감지 — 이번 실행 모든 ${platform} 중단(IP 쿨다운)`);
+        }
         cooldown.saveState(st);
         const until = cooldown.coolingUntil(st, storeId, platform, Date.now());
         if (until) log(`  ⏸ ${platform} 쿨다운 — ${kstHm(until)} KST 이후 재시도`);
@@ -313,8 +319,11 @@ async function runAll({ dryRun }) {
     const nowMs = Date.now();
     const cooling = [];
     const collectPlatforms = ignoreCooldown ? platforms : platforms.filter((p) => {
-      const until = cooldown.appliesTo(p) && cooldown.coolingUntil(cdState, store.storeId, p, nowMs);
-      if (until) { cooling.push(`${p}(재시도 ${kstHm(until)} KST 이후)`); return false; }
+      if (!cooldown.appliesTo(p)) return true;
+      // 전역(IP) 쿨다운 우선 — 직전 매장에서 throttle 났으면 이 매장 쿠팡도 skip.
+      const gUntil = cooldown.coolingUntil(cdState, cooldown.GLOBAL_STORE, p, nowMs);
+      const until = gUntil || cooldown.coolingUntil(cdState, store.storeId, p, nowMs);
+      if (until) { cooling.push(`${p}(재시도 ${kstHm(until)} KST 이후${gUntil ? ', 전역' : ''})`); return false; }
       return true;
     });
 

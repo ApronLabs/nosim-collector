@@ -32,6 +32,10 @@ const config = {
 };
 
 const SHOW = process.argv.includes('--show');
+// 자동 로그인(id/pw 자동입력)은 Akamai 봇감지의 핵심 신호 → 기본 OFF.
+// 원칙: 살아있는 세션 재사용. 만료 시 --show 창에서 사람이 1회 로그인(엔트로피 있어 통과)
+// → 세션이 user-data-dir 에 저장돼 이후 자동 재사용. 굳이 자동입력하려면 --auto-login.
+const AUTO_LOGIN = process.argv.includes('--auto-login');
 const LOG_FILE = path.join(__dirname, 'poc-coupangeats-log.txt');
 
 // ── stdout JSON 프로토콜 ──
@@ -334,6 +338,15 @@ function nav(url, t=30000) {
 }
 const isLogin = u => u.includes('/login') || u.includes('/signin');
 
+// Akamai 차단/throttle 문구가 현재 페이지에 떠 있나 (봇감지 신호 — 보이면 즉시 중단).
+async function hasBlockText() {
+  try {
+    return await webView.webContents.executeJavaScript(
+      `!!(document.body && /해당하는 요청을 처리할 권한이 존재하지 않|페이지가 작동하지 않습니다|매장 목록을 불러오지 못했습니다/.test(document.body.innerText))`
+    );
+  } catch { return false; }
+}
+
 // 로그인 페이지에서 벗어날 때까지 대기 (수동 로그인 통과 감지). baemin 패턴 차용.
 function waitForLoginRedirect(timeoutMs = 180000) {
   return new Promise(resolve => {
@@ -574,28 +587,36 @@ app.whenReady().then(async () => {
     await sleep(10000);
     let url = webView.webContents.getURL();
 
-    if (isLogin(url)) {
-      // 세션 없음/만료 → 로그인 필요
-      log('   세션 없음 — 로그인 시도');
-      const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
-      if (!hf.i || !hf.p) { await sleep(5000);
-        const r = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
-        if (!r.i || !r.p) throw new Error('로그인 폼 없음');
-      }
-      // a) 자동 로그인 시도 (봇감지에 걸릴 수 있음)
-      const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
-      if (lr.success) { log('   자동 로그인 제출 — 응답 10초...'); await sleep(10000); url = webView.webContents.getURL(); }
+    // Akamai 차단 문구가 화면에 떠 있으면 = 봇감지/throttle → 즉시 중단(재시도가 차단을 키움).
+    if (await hasBlockText()) {
+      throw new Error('Akamai 차단 감지(권한 없음/페이지 오류) — 즉시 중단, 쿨다운 필요');
+    }
 
-      // b) 자동 실패 → 수동 로그인 대기 (--show 일 때만; 통과 후 세션이 user-data-dir 에 저장됨)
+    if (isLogin(url)) {
+      // 세션 없음/만료
+      log('   세션 없음/만료');
+      // a) 자동 로그인은 봇감지 신호 → 기본 OFF. --auto-login 일 때만 시도.
+      if (AUTO_LOGIN) {
+        log('   --auto-login: 자동 로그인 시도(봇감지 위험)');
+        const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
+        if (hf.i && hf.p) {
+          const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
+          if (lr.success) { log('   자동 로그인 제출 — 응답 10초...'); await sleep(10000); url = webView.webContents.getURL(); }
+        }
+      }
+      // b) 세션 만료 → 수동 로그인 대기(--show). 통과 후 세션이 user-data-dir 에 저장됨.
       if (isLogin(url)) {
         if (SHOW) {
-          emit('status', { msg: '쿠팡이츠 자동 로그인 실패 — 창에서 직접 로그인해 주세요 (180초 대기)' });
-          log('   자동 로그인 실패(봇감지 추정) — 수동 로그인 대기 180초');
+          emit('status', { msg: '쿠팡이츠 세션 만료 — 창에서 직접 로그인해 주세요 (180초 대기)' });
+          log('   세션 만료 — 수동 로그인 대기 180초 (--show)');
           url = await waitForLoginRedirect(180000);
         }
+        if (await hasBlockText()) {
+          throw new Error('Akamai 차단 감지(로그인 화면) — 즉시 중단, 쿨다운 필요');
+        }
         if (isLogin(url)) {
-          emit('error', { error: '쿠팡이츠 로그인 실패 — 최초 1회 --show 로 수동 로그인 후 세션 저장 필요' });
-          throw new Error('로그인 잔류');
+          emit('error', { error: '쿠팡이츠 세션 만료 — 재인증 필요(자동입력은 봇감지로 비활성). --show 로 1회 로그인하면 세션 저장됨' });
+          throw new Error('세션 만료 — 재인증 필요');
         }
         log('   수동 로그인 성공 — 세션 저장됨 (이후 자동 재사용)');
       }
@@ -619,6 +640,12 @@ app.whenReady().then(async () => {
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
     await sleep(2000);
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
+
+    // 매장 페이지에 Akamai/오류 토스트(매장목록 실패·페이지 작동안함)면 throttle → 즉시 중단.
+    // (빈손으로 진행해 done 만 찍고 끝내면 #58 쿨다운이 안 걸려 30분마다 또 두드림)
+    if (await hasBlockText()) {
+      throw new Error('Akamai throttle: 매장 페이지 조회 차단 — 즉시 중단, 쿨다운 필요');
+    }
 
     const sr = await webView.webContents.executeJavaScript(JS_FIND_STORES);
     log(`   결과: success=${sr.success} method=${sr.method||'-'} stores=${sr.stores?.length||0}`);
@@ -665,6 +692,10 @@ app.whenReady().then(async () => {
         if (!s.storeId) s.storeId = defId;
       }
     } else {
+      // 매장 탐색 실패 + 기본 storeId(defId)도 없으면 = 페이지/세션 이상(throttle 추정) → 중단.
+      if (!defId) {
+        throw new Error('매장 식별 실패(defId 없음) — throttle/세션 이상 추정, 즉시 중단');
+      }
       const name = await webView.webContents.executeJavaScript(`(function(){
         let n='';document.querySelectorAll('*').forEach(el=>{
           const r=el.getBoundingClientRect();

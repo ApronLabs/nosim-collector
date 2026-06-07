@@ -24,6 +24,22 @@ const BASE_MS = 40 * 60 * 1000; // 40분 (박제: "40분 쉬고 실패 날짜만
 const MAX_MS = 3 * 60 * 60 * 1000; // 상한 3시간
 const FACTOR = 2;
 
+// IP 전역 쿨다운용 의사(pseudo) store 키 — 한 계정이라도 throttle 나면 그 실행의 모든 쿠팡 정지.
+const GLOBAL_STORE = '__global__';
+
+// throttle/봇감지 신호 (단순 0건·세션만료와 구분 — 이게 뜨면 IP 전역 쿨다운을 건다).
+const THROTTLE_PATTERNS = [
+  '권한이 존재하지 않', // Akamai 로그인 차단
+  '매장 목록을 불러오지', // 매장 페이지 throttle
+  '페이지가 작동하지', // 페이지 오류
+  'throttle',
+  'Akamai',
+];
+function isThrottleError(msg) {
+  const s = String(msg == null ? '' : msg);
+  return THROTTLE_PATTERNS.some((p) => s.includes(p));
+}
+
 function appliesTo(platform) {
   return COOLDOWN_PLATFORMS.has(platform);
 }
@@ -93,6 +109,9 @@ module.exports = {
   BASE_MS,
   MAX_MS,
   FACTOR,
+  GLOBAL_STORE,
+  THROTTLE_PATTERNS,
+  isThrottleError,
   appliesTo,
   keyOf,
   nextBackoffMs,

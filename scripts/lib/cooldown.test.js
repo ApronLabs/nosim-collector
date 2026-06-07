@@ -15,6 +15,26 @@ test('appliesTo — 쿠팡만 쿨다운 대상', () => {
   assert.strictEqual(cd.appliesTo('okpos'), false);
 });
 
+test('isThrottleError — throttle/봇감지 신호만 true', () => {
+  assert.strictEqual(cd.isThrottleError('해당하는 요청을 처리할 권한이 존재하지 않습니다'), true);
+  assert.strictEqual(cd.isThrottleError('매장 목록을 불러오지 못했습니다'), true);
+  assert.strictEqual(cd.isThrottleError('Akamai throttle: 매장 페이지 조회 차단'), true);
+  // 단순 만료/0건은 전역 차단 신호 아님
+  assert.strictEqual(cd.isThrottleError('세션 만료 — 재인증 필요'), false);
+  assert.strictEqual(cd.isThrottleError(''), false);
+  assert.strictEqual(cd.isThrottleError(null), false);
+});
+
+test('전역(GLOBAL) 쿨다운 — 한 계정 throttle → 모든 쿠팡 정지', () => {
+  const now = 0;
+  const st = {};
+  // 매장 A throttle → 전역 쿨다운 기록
+  cd.recordFailure(st, cd.GLOBAL_STORE, 'coupangeats', now, 'throttle');
+  // 매장 B(다른 storeId)도 전역 쿨다운에 걸려야 함
+  assert.ok(cd.coolingUntil(st, cd.GLOBAL_STORE, 'coupangeats', now));
+  assert.strictEqual(cd.coolingUntil(st, cd.GLOBAL_STORE, 'coupangeats', now), now + 40 * MIN);
+});
+
 test('nextBackoffMs — 점증 + 상한', () => {
   assert.strictEqual(cd.nextBackoffMs(1), 40 * MIN);
   assert.strictEqual(cd.nextBackoffMs(2), 80 * MIN);
