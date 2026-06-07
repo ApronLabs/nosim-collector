@@ -33,5 +33,3 @@ collect-logs/
 scripts/poc-*-debug.js
 scripts/poc-*-debug-log.txt
 
-# 수집기 로컬 설정 (배포 충돌 방지 — git pull 만으로 배포되게). 템플릿: collect-stores.config.example.json
-scripts/collect-stores.config.json

@@ -1,0 +1,5 @@
+{
+  "serverUrl": "https://no-sim.co.kr",
+  "collectTime": "11:00",
+  "_comment": "수집 대상 = 노심 전체 매장(동적). 노심 UI 에서 매장별 배달앱/POS 계정만 등록하면 자동 수집됨. 계정 없는 매장은 자동 skip. 비밀번호는 여기 적지 않음(노심 API 로 복호화 fetch). 특정 매장만 강제하려면 stores 배열 추가(백필용)."
+}
