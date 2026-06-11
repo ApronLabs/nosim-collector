@@ -77,10 +77,26 @@ function recordFailure(state, storeId, platform, nowMs, errorMsg) {
   return state;
 }
 
-/** 성공 기록: 해당 키 제거(쿨다운 해제). */
-function recordSuccess(state, storeId, platform) {
-  delete state[keyOf(storeId, platform)];
+/** 성공 기록: 쿨다운 해제 + 마지막 성공 시각 보존(수집 간격 판단용). */
+function recordSuccess(state, storeId, platform, nowMs) {
+  state[keyOf(storeId, platform)] = { lastSuccessAt: nowMs == null ? Date.now() : nowMs };
   return state;
+}
+
+/**
+ * 최근 성공 후 최소 간격(intervalMs)이 안 지났으면 다음 허용 epoch(ms), 지났으면 null.
+ *
+ * 목적: 쿠팡 Akamai 노출 감소. 세션이 살아 있어도 30분마다 방문(하루 48회)하면
+ * rate 신호가 쌓인다 — 성공 후 N시간은 재방문을 건너뛰어 하루 ~8회로 줄인다.
+ * 실패 상태(recordFailure 가 키를 덮어씀)에선 lastSuccessAt 이 없어 적용 안 됨
+ * (backoff 쿨다운이 우선). 수동 백필/--force 는 호출부에서 무시.
+ */
+function successIntervalUntil(state, storeId, platform, nowMs, intervalMs) {
+  if (!intervalMs || intervalMs <= 0) return null;
+  const e = state && state[keyOf(storeId, platform)];
+  if (!e || e.lastSuccessAt == null) return null;
+  const until = e.lastSuccessAt + intervalMs;
+  return until > nowMs ? until : null;
 }
 
 // ─── 파일 IO ───
@@ -116,6 +132,7 @@ module.exports = {
   keyOf,
   nextBackoffMs,
   coolingUntil,
+  successIntervalUntil,
   recordFailure,
   recordSuccess,
   loadState,
