@@ -12,7 +12,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\collect-control.ps1 -Action status
 #>
 param(
-  [ValidateSet('menu', 'deploy', 'on', 'off', 'test', 'dry', 'status', 'reset-cooldown')]
+  [ValidateSet('menu', 'deploy', 'on', 'off', 'test', 'dry', 'status', 'reset-cooldown', 'inspect')]
   [string]$Action = 'menu'
 )
 
@@ -233,6 +233,24 @@ function Invoke-ResetCooldown {
   Write-Note '주의: 방금 차단(throttle) 당한 직후면 초기화해도 다시 막힙니다. 40분 쉰 뒤 시도하세요.'
 }
 
+# ─── 쿠팡 화면 진단 (개발용) — UI-구동 수집 설계 위해 주문페이지 DOM/XHR 덤프 ───
+function Invoke-InspectCoupang {
+  Write-Title '쿠팡 화면 진단 (개발용)'
+  Assert-Tools
+  Set-Location $repo
+  Write-Dim '평소처럼 수집하면서 쿠팡 주문페이지의 버튼/날짜/페이지네이션 구조를 떠서 파일에 기록합니다.'
+  Write-Dim '쿠팡 창이 뜨면 (세션 만료 시) 로그인해 주세요. 수집 자체는 정상 진행됩니다.'
+  $node = (Get-Command node).Source
+  & $node 'scripts\collect-stores.js' '--inspect-coupang' '--force'
+  Write-Host ''
+  $f = Join-Path $repo 'scripts\coupang-inspect.txt'
+  if (Test-Path $f) {
+    Write-Ok "진단 파일 생성됨: $f"
+    Write-Note '이 파일(scripts\coupang-inspect.txt) 내용을 개발자(클로드)에게 그대로 붙여주세요.'
+  }
+  else { Write-Bad '진단 파일이 안 생겼습니다 — 쿠팡 수집이 로그인 단계에서 멈췄을 수 있어요.' }
+}
+
 # ─── 메뉴 루프 ───
 function Show-Menu {
   while ($true) {
@@ -253,6 +271,7 @@ function Show-Menu {
     Write-Host '   5)  점검만         ' -NoNewline -ForegroundColor White; Write-Host '로그인/계정조회만 (dry-run)' -ForegroundColor Gray
     Write-Host '   6)  상태 보기      ' -NoNewline -ForegroundColor White; Write-Host '작업/버전/로그/쿨다운' -ForegroundColor Gray
     Write-Host '   7)  쿠팡 쿨다운 초기화' -ForegroundColor White
+    Write-Host '   8)  쿠팡 화면 진단   ' -NoNewline -ForegroundColor White; Write-Host '(개발용) 주문페이지 구조 떠서 파일로' -ForegroundColor Gray
     Write-Host '   0)  종료' -ForegroundColor White
     Write-Host ('-' * 52) -ForegroundColor DarkGray
     $choice = Read-Host '   번호 선택'
@@ -266,8 +285,9 @@ function Show-Menu {
         '5' { Invoke-Test -Dry }
         '6' { Invoke-Status }
         '7' { Invoke-ResetCooldown }
+        '8' { Invoke-InspectCoupang }
         '0' { return }
-        default { Write-Note '1~7 또는 0 을 입력하세요.' }
+        default { Write-Note '1~8 또는 0 을 입력하세요.' }
       }
     }
     catch {
@@ -289,6 +309,7 @@ try {
     'dry'            { Invoke-Test -Dry }
     'status'         { Invoke-Status }
     'reset-cooldown' { Invoke-ResetCooldown }
+    'inspect'        { Invoke-InspectCoupang }
   }
 }
 catch {

@@ -37,7 +37,11 @@ const SHOW = process.argv.includes('--show');
 // 원칙: 살아있는 세션 재사용. 만료 시 --show 창에서 사람이 1회 로그인(엔트로피 있어 통과)
 // → 세션이 user-data-dir 에 저장돼 이후 자동 재사용. 굳이 자동입력하려면 --auto-login.
 const AUTO_LOGIN = process.argv.includes('--auto-login');
+// 진단 모드 — 주문페이지의 실제 DOM(버튼/날짜/페이지네이션) + 페이지 자체 XHR 캡처를
+// 별도 파일에 덤프. UI-구동 수집(#3) 을 정확히 만들기 위한 화면 구조 확보용. 수집은 평소대로 진행.
+const UI_INSPECT = process.argv.includes('--inspect-coupang');
 const LOG_FILE = path.join(__dirname, 'poc-coupangeats-log.txt');
+const INSPECT_FILE = path.join(__dirname, 'coupang-inspect.txt');
 
 // 프로세스 종료 코드. 에러/차단으로 끝나면 1 로 두고 app.exit(1) → poc-runner 가 reject
 // → collect-stores 가 실패로 인식(throttle 이면 전역 쿨다운 + Slack 보고). 과거엔 무조건
@@ -415,6 +419,46 @@ function waitForLoginRedirect(timeoutMs = 180000) {
   });
 }
 
+/* ─────────── 진단: 주문페이지 DOM + 자체 XHR 덤프 (#3 설계용) ─────────── */
+// 보이는 버튼/링크 텍스트, 날짜 입력, 페이지네이션 후보, 페이지가 스스로 쏜 주문 XHR 캡처를
+// JSON 으로 반환. createdAt 샘플로 "페이지 기본 날짜범위(오늘/주/월)"를 역산할 수 있다.
+const JS_INSPECT_ORDERS = `(function(){
+  function vis(el){try{return el&&el.offsetHeight>0&&el.offsetWidth>0}catch(e){return false}}
+  const out={url:location.href};
+  out.buttons = Array.from(document.querySelectorAll('button,a,[role="button"]')).filter(vis)
+    .map(el=>({t:(el.innerText||'').trim().slice(0,24),tag:el.tagName,
+      cls:((el.className&&el.className.toString())||'').slice(0,50),aria:el.getAttribute('aria-label')||''}))
+    .filter(b=>b.t||b.aria).slice(0,90);
+  out.dateish = Array.from(document.querySelectorAll('input,[class*="date"],[class*="Date"],[class*="calendar"],[class*="picker"],[class*="Picker"]')).filter(vis)
+    .map(el=>({tag:el.tagName,type:el.type||'',val:(el.value||'').slice(0,24),
+      cls:((el.className&&el.className.toString())||'').slice(0,60),ph:el.placeholder||''})).slice(0,30);
+  out.pagination = Array.from(document.querySelectorAll('[class*="pag"],[class*="Pag"],[class*="paging"],nav,[role="navigation"]')).filter(vis)
+    .map(el=>({cls:((el.className&&el.className.toString())||'').slice(0,60),
+      html:((el.innerHTML||'').replace(/\\s+/g,' ')).slice(0,240)})).slice(0,12);
+  const cap=window.__coupangCapture||[];
+  out.captureCount=cap.length;
+  if(cap.length){
+    const d=cap[cap.length-1].data||{};
+    out.captureKeys=Object.keys(d);
+    const content=(d.orderPageVo&&d.orderPageVo.content)||d.content||[];
+    out.captureTotalOrderCount=(d.totalOrderCount!=null?d.totalOrderCount:(d.orderPageVo&&d.orderPageVo.totalElements))||null;
+    out.captureSampleCreatedAt=content.slice(0,6).map(o=>o.createdAt);
+  }
+  return JSON.stringify(out);
+})()`;
+
+async function dumpInspect(name, id) {
+  try {
+    const raw = await webView.webContents.executeJavaScript(JS_INSPECT_ORDERS);
+    const header = `\n===== INSPECT ${name} (${id}) @ ${new Date().toISOString()} =====\n`;
+    fs.appendFileSync(INSPECT_FILE, header + raw + '\n');
+    log(`   🔎 진단 덤프 기록: ${INSPECT_FILE}`);
+    emit('status', { msg: `진단 덤프 기록됨: coupang-inspect.txt` });
+  } catch (e) {
+    log(`   진단 덤프 실패: ${e.message}`);
+  }
+}
+
 /* ─────────── 매장별 수집 (XHR API) ─────────── */
 async function collectStore(name, id, dr) {
   log(`\n===== ${name} (${id}) =====`);
@@ -441,6 +485,12 @@ async function collectStore(name, id, dr) {
   await webView.webContents.executeJavaScript(JS_HUMAN_SCROLL).catch(()=>{});
   await hsleep(2500, 6000);
   await humanMouse(rnd(1, 3));
+
+  // 진단 모드: 페이지 자동조회 XHR 이 잡힐 시간을 좀 더 준 뒤 DOM+캡처 덤프(수집은 그대로 진행).
+  if (UI_INSPECT) {
+    await hsleep(1500, 2500);
+    await dumpInspect(name, id);
+  }
 
   // XHR API 호출 (JSON.stringify로 반환 → JSON.parse로 파싱, 직렬화 문제 방지)
   log(`   API 호출: storeId=${id}, ${dr.startDash}(${dr.startMs}) ~ ${dr.endDash}(${dr.endMs})`);
@@ -641,7 +691,10 @@ app.whenReady().then(async () => {
 
   mainWindow = new BrowserWindow({ width: 1200, height: 900, show: SHOW });
   mainWindow.loadURL('about:blank');
-  webView = new WebContentsView({ webPreferences: { contextIsolation: false, nodeIntegration: false } });
+  // 진단 모드에서만 preload(주문 XHR 캡처) 주입 — 평소 수집 동작은 그대로 유지.
+  const webPreferences = { contextIsolation: false, nodeIntegration: false };
+  if (UI_INSPECT) webPreferences.preload = path.join(__dirname, 'coupang-preload.js');
+  webView = new WebContentsView({ webPreferences });
   mainWindow.contentView.addChildView(webView);
   const [w, h] = mainWindow.getContentSize();
   webView.setBounds({ x: 0, y: 0, width: w, height: h });
