@@ -424,6 +424,38 @@ function waitForLoginRedirect(timeoutMs = 180000) {
   });
 }
 
+/* ─────────── 로그인 세션 오래가게: '로그인 상태 유지' 체크박스 자동 체크 ─────────── */
+// 로그인 화면에 '로그인 상태 유지/자동 로그인/로그인 유지' 체크박스가 있으면 켠다(비번은 사람/
+// jsLogin 이 입력, 체크박스만 자동 — 안전). 세션이 2시간→며칠/주 단위로 늘어 재로그인 빈도↓.
+// 라벨 텍스트 휴리스틱(쿠팡 DOM 셀렉터 추측 안 함). 못 찾으면 no-op.
+const JS_CHECK_KEEP_LOGIN = `(function(){
+  try{
+    var re=/로그인\\s*상태\\s*유지|자동\\s*로그인|로그인\\s*유지|기억하기|remember/i;
+    var boxes=Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"]'));
+    for(var i=0;i<boxes.length;i++){
+      var b=boxes[i];
+      var lbl=(b.closest('label')&&b.closest('label').innerText)||'';
+      if(!lbl&&b.id){var l2=document.querySelector('label[for="'+b.id+'"]');lbl=l2?l2.innerText:'';}
+      if(!lbl){var p=b.parentElement;lbl=(p&&p.innerText)||'';}
+      if(re.test(lbl)){ if(!b.checked){ b.click(); } return {found:true,label:(lbl||'').trim().slice(0,30),checked:b.checked}; }
+    }
+    // 라벨 매칭 실패 시 아무것도 건드리지 않음(엉뚱한 박스 클릭 방지). DOM 덤프로 정확히 확인 후 보완.
+    return {found:false,count:boxes.length};
+  }catch(e){ return {found:false,error:String(e)}; }
+})()`;
+
+// 로그인 화면 진단용 — 체크박스/버튼 후보를 로그에 남겨 유지옵션 셀렉터를 확인.
+const JS_DUMP_LOGIN = `(function(){
+  function vis(el){try{return el&&el.offsetHeight>0}catch(e){return false}}
+  var boxes=Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"]')).map(function(b){
+    var lbl=(b.closest('label')&&b.closest('label').innerText)||'';
+    if(!lbl&&b.id){var l2=document.querySelector('label[for="'+b.id+'"]');lbl=l2?l2.innerText:'';}
+    if(!lbl){lbl=(b.parentElement&&b.parentElement.innerText)||'';}
+    return {id:b.id||'',name:b.name||'',checked:b.checked,label:(lbl||'').replace(/\\s+/g,' ').trim().slice(0,40)};
+  });
+  return JSON.stringify({url:location.href,checkboxes:boxes});
+})()`;
+
 /* ─────────── 진단: 주문페이지 DOM + 자체 XHR 덤프 (#3 설계용) ─────────── */
 // 보이는 버튼/링크 텍스트, 날짜 입력, 페이지네이션 후보, 페이지가 스스로 쏜 주문 XHR 캡처를
 // JSON 으로 반환. createdAt 샘플로 "페이지 기본 날짜범위(오늘/주/월)"를 역산할 수 있다.
@@ -835,16 +867,38 @@ app.whenReady().then(async () => {
     if (isLogin(url)) {
       // 세션 없음/만료
       log('   세션 없음/만료');
-      // a) 자동 로그인은 봇감지 신호 → 기본 OFF. --auto-login 일 때만 시도.
+
+      // 로그인 화면 DOM(체크박스+라벨/id/name)을 진단파일에 항상 덤프 — 추측 대신 실측으로
+      // '로그인 상태 유지' 셀렉터를 확정하기 위함(orders 진단과 동일 방식). 다음 세션만료 때
+      // 자동 캡처되니 coupang-inspect.txt 를 개발자에게 보내면 정밀 보완.
+      try {
+        const dump = await webView.webContents.executeJavaScript(JS_DUMP_LOGIN);
+        log(`   로그인화면 체크박스: ${dump}`);
+        try { fs.appendFileSync(INSPECT_FILE, `\n===== LOGIN ${new Date().toISOString()} =====\n${dump}\n`); } catch {}
+      } catch {}
+      // 라벨이 명확히 '로그인 상태 유지'류인 체크박스만 켠다(엉뚱한 박스 안 건드림). 세션 수명↑.
+      const keep = await webView.webContents.executeJavaScript(JS_CHECK_KEEP_LOGIN).catch(() => null);
+      if (keep && keep.found) log(`   '로그인 상태 유지' 체크: ${keep.label || ''} (checked=${keep.checked})`);
+      else log(`   '로그인 상태 유지' 라벨 매칭 실패(box ${keep ? keep.count : '?'}개) — DOM 덤프로 보완 예정`);
+
+      // a) 자동 로그인 — 사람 같은 타이핑(jsLogin)으로 1회만. 세션 만료 시 무인 복구용.
+      //    Akamai 최고위험 지점이라: 1회만, 차단 신호 뜨면 즉시 중단. config.coupangAutoLogin 로 끔.
       if (AUTO_LOGIN) {
-        log('   --auto-login: 자동 로그인 시도(봇감지 위험)');
+        log('   자동 로그인 시도 (사람 같은 타이핑, 1회)');
+        await humanMouse(rnd(2, 4));
         const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
         if (hf.i && hf.p) {
           const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
           if (lr.success) { log('   자동 로그인 제출 — 응답 대기...'); await jsleep(10000); url = webView.webContents.getURL(); }
         }
+        // 자동 로그인 직후 차단 문구 뜨면 즉시 중단(난타 금지). 메시지에 'Akamai' → 전역 쿨다운.
+        if (await hasBlockText()) {
+          throw new Error('Akamai 차단 감지(자동 로그인 직후) — 즉시 중단, 쿨다운 필요');
+        }
+        if (!isLogin(url)) log('   자동 로그인 성공 — 세션 저장됨 (이후 자동 재사용)');
       }
-      // b) 세션 만료 → 수동 로그인 대기(--show). 통과 후 세션이 user-data-dir 에 저장됨.
+
+      // b) 자동 로그인이 실패/비활성이면 수동 로그인 대기(--show, 사람이 있을 때만 의미).
       if (isLogin(url)) {
         if (SHOW) {
           emit('status', { msg: '쿠팡이츠 세션 만료 — 창에서 직접 로그인해 주세요 (180초 대기)' });
@@ -855,7 +909,7 @@ app.whenReady().then(async () => {
           throw new Error('Akamai 차단 감지(로그인 화면) — 즉시 중단, 쿨다운 필요');
         }
         if (isLogin(url)) {
-          emit('error', { error: '쿠팡이츠 세션 만료 — 재인증 필요(자동입력은 봇감지로 비활성). --show 로 1회 로그인하면 세션 저장됨' });
+          emit('error', { error: '쿠팡이츠 세션 만료 — 자동 로그인 실패. 사무실 PC 창에서 1회 로그인 필요' });
           throw new Error('세션 만료 — 재인증 필요');
         }
         log('   수동 로그인 성공 — 세션 저장됨 (이후 자동 재사용)');

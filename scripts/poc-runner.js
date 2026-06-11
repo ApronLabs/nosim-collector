@@ -84,6 +84,10 @@ class PocRunner {
     if (options.uiDrive) {
       args.push('--ui-drive');
     }
+    // coupangeats 자동 로그인: 세션 만료 시 사람 같은 타이핑으로 1회 자동 로그인
+    if (options.autoLogin) {
+      args.push('--auto-login');
+    }
 
     log(`spawn: ${electronPath}`);
     log(`args: ${JSON.stringify(args)}`);
