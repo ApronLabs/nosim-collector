@@ -85,3 +85,43 @@ test('load/save 라운드트립 + 깨진 파일은 빈 객체', () => {
     try { fs.unlinkSync(f); } catch {}
   }
 });
+
+test('recordSuccess — lastSuccessAt 보존 + backoff 리셋', () => {
+  const now = 1_000_000;
+  const st = {};
+  cd.recordFailure(st, 's', 'coupangeats', now, 'e');
+  cd.recordSuccess(st, 's', 'coupangeats', now + 10 * MIN);
+  // 쿨다운은 해제되고
+  assert.strictEqual(cd.coolingUntil(st, 's', 'coupangeats', now + 10 * MIN), null);
+  // 성공 시각은 남는다
+  assert.strictEqual(st[cd.keyOf('s', 'coupangeats')].lastSuccessAt, now + 10 * MIN);
+  // 성공 후 첫 실패는 backoff 1회차(40분)부터 다시 시작
+  cd.recordFailure(st, 's', 'coupangeats', now + 20 * MIN, 'e');
+  assert.strictEqual(cd.coolingUntil(st, 's', 'coupangeats', now + 20 * MIN), now + 20 * MIN + 40 * MIN);
+});
+
+test('successIntervalUntil — 성공 후 간격 이내면 다음 허용 시각, 지나면 null', () => {
+  const now = 0;
+  const ivMs = 3 * 60 * MIN; // 3시간
+  const st = {};
+  // 기록 없음 → 즉시 허용
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now, ivMs), null);
+  cd.recordSuccess(st, 's', 'coupangeats', now);
+  // 간격 이내 → skip (다음 허용 시각 반환)
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now + 30 * MIN, ivMs), now + ivMs);
+  // 간격 경과 → 허용
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now + ivMs, ivMs), null);
+  // interval 0/null → 비활성 (기존처럼 매 실행 수집)
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now + 1, 0), null);
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now + 1, null), null);
+});
+
+test('successIntervalUntil — 실패가 끼면 lastSuccessAt 이 사라져 간격 미적용(쿨다운이 우선)', () => {
+  const now = 0;
+  const ivMs = 3 * 60 * MIN;
+  const st = {};
+  cd.recordSuccess(st, 's', 'coupangeats', now);
+  cd.recordFailure(st, 's', 'coupangeats', now + 10 * MIN, 'e');
+  assert.strictEqual(cd.successIntervalUntil(st, 's', 'coupangeats', now + 20 * MIN, ivMs), null);
+  assert.ok(cd.coolingUntil(st, 's', 'coupangeats', now + 20 * MIN));
+});

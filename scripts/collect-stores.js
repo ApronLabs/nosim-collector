@@ -126,6 +126,27 @@ async function fetchCollectStores(serverUrl, token) {
     .map((s) => ({ storeId: s.id, name: s.name || String(s.id).slice(0, 8), closingTime: s.closing_time || null }));
 }
 
+// 수집 실패를 노심에 즉시 보고 (노심 PR #1674 report-failure 라우트).
+// 로그인 단계 실패는 ingest 에 도달하지 못해 노심 흔적이 0 이던 빈틈
+// (2026-06-01 쿠팡 5일 무음)을 막는다 — 노심이 crawler_sync_logs 에 failed 를
+// 남기고 Slack #크롤링-보고 로 알림(매장×플랫폼 6시간 dedupe 는 서버가 처리).
+async function reportFailure({ serverUrl, token, storeId, platform, targetDate, reason, throttle }) {
+  try {
+    await fetch(`${serverUrl}/api/stores/${encodeURIComponent(storeId)}/crawler/report-failure`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `session-token=${token}` },
+      body: JSON.stringify({
+        platform,
+        targetDate,
+        error: String(reason == null ? '' : reason).slice(0, 500),
+        throttle: !!throttle,
+      }),
+    });
+  } catch {
+    /* 보고 실패가 수집을 막지 않는다 */
+  }
+}
+
 async function fetchStoreCredentials(serverUrl, storeId, token) {
   const url = `${serverUrl}/api/suppliers/platform-accounts?storeId=${encodeURIComponent(storeId)}&withCredentials=true`;
   const res = await fetch(url, { headers: { Cookie: `session-token=${token}` } });
@@ -189,6 +210,14 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
       onError: (m) => { lastError = m?.error || 'unknown'; },
     });
 
+    // 쿠팡 실행 전 짧은 랜덤 지연 — 작업 스케줄러의 30분 정주기 방문 패턴을
+    // 흩뜨림(Akamai rate 신호 완화). 수동 백필(--manual)은 즉시 실행.
+    if (platform === 'coupangeats' && !hasFlag('manual')) {
+      const jitterMs = 10_000 + Math.floor(Math.random() * 50_000);
+      log(`  ⏲ ${platform} 지터 ${Math.round(jitterMs / 1000)}s 대기`);
+      await new Promise((r) => setTimeout(r, jitterMs));
+    }
+
     log(`  ▶ ${platform} (loginId=${cred.id})`);
     try {
       const r = await runner.run(cred.id, cred.pw, {
@@ -199,23 +228,25 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
       });
       const orders = sumOrders(r || resultMsg);
       log(`  ✅ ${platform} — ${orders == null ? '완료' : orders + ' orders'}`);
-      // 성공 → 쿨다운 해제 (수동 백필 성공도 세션 정상이므로 자동 재시도 재개).
+      // 성공 → 쿨다운 해제 + 성공 시각 기록 (수동 백필 성공도 세션 정상이므로
+      // 자동 재시도 재개. 성공 시각은 쿠팡 수집 간격 판단에 사용).
       if (cooldown.appliesTo(platform)) {
         const st = cooldown.loadState();
-        cooldown.recordSuccess(st, storeId, platform);
+        cooldown.recordSuccess(st, storeId, platform, Date.now());
         cooldown.saveState(st);
       }
     } catch (err) {
       hadFailure = true;
-      log(`  ❌ ${platform} — ${lastError || err.message}`);
+      const reason = lastError || err.message;
+      const throttled = cooldown.isThrottleError(reason);
+      log(`  ❌ ${platform} — ${reason}`);
       // 실패 → 점증 backoff 기록 (쿠팡 등 레이트리밋 민감 플랫폼만). 다음 자동
       // 실행은 until 전까지 이 플랫폼을 건너뛴다 → Akamai 차단 고착 방지.
       if (cooldown.appliesTo(platform)) {
         const st = cooldown.loadState();
-        const reason = lastError || err.message;
         cooldown.recordFailure(st, storeId, platform, Date.now(), reason);
         // throttle/봇감지면 IP 전역 쿨다운 → 이번 실행의 다른 매장 쿠팡도 전부 중단(난타 방지).
-        if (cooldown.isThrottleError(reason)) {
+        if (throttled) {
           cooldown.recordFailure(st, cooldown.GLOBAL_STORE, platform, Date.now(), 'throttle');
           log(`  🛑 ${platform} throttle 감지 — 이번 실행 모든 ${platform} 중단(IP 쿨다운)`);
         }
@@ -223,6 +254,8 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
         const until = cooldown.coolingUntil(st, storeId, platform, Date.now());
         if (until) log(`  ⏸ ${platform} 쿨다운 — ${kstHm(until)} KST 이후 재시도`);
       }
+      // 노심에 즉시 보고 → Slack 알림. 로그인 실패도 노심에 흔적을 남긴다.
+      await reportFailure({ serverUrl, token, storeId, platform, targetDate, reason, throttle: throttled });
     } finally {
       runner.destroy();
     }
@@ -231,7 +264,7 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
 }
 
 // ─── 부모: 매장 순차 (각 매장 독립 자식 프로세스) ───
-function spawnStoreChild(store, { serverUrl, targetDate, token }) {
+function spawnStoreChild(store, { serverUrl, targetDate, token, manual }) {
   const args = [
     __filename,
     `--store=${store.storeId}`,
@@ -240,6 +273,8 @@ function spawnStoreChild(store, { serverUrl, targetDate, token }) {
     `--targetDate=${targetDate}`,
     `--server=${serverUrl}`,
     `--sessionToken=${token}`,
+    // 수동 실행(백필/--force)은 쿠팡 지터 없이 즉시 수집.
+    ...(manual ? ['--manual'] : []),
   ];
   return spawn(process.execPath, args, { stdio: 'inherit' });
 }
@@ -256,6 +291,10 @@ async function runAll({ dryRun }) {
   const manualDate = getArg('targetDate') || null;
   // 수동 백필(--targetDate)·--force 는 쿨다운 무시 (재로그인 직후 즉시 재수집용).
   const ignoreCooldown = hasFlag('force') || !!manualDate;
+  // 쿠팡 최소 수집 간격(시간, config coupangIntervalHours, 기본 3). 세션이 살아
+  // 있어도 30분마다 방문하면 Akamai rate 신호가 쌓인다 — 성공 후 이 간격은
+  // 재방문을 건너뛴다. 0 으로 두면 비활성(기존처럼 매 실행 수집).
+  const coupangIntervalMs = (cfg.coupangIntervalHours == null ? 3 : cfg.coupangIntervalHours) * 3600 * 1000;
   const now = new Date();
   setLogFile(kstToday()); // 로그는 실행일(KST) 기준 1개 파일
 
@@ -324,6 +363,11 @@ async function runAll({ dryRun }) {
       const gUntil = cooldown.coolingUntil(cdState, cooldown.GLOBAL_STORE, p, nowMs);
       const until = gUntil || cooldown.coolingUntil(cdState, store.storeId, p, nowMs);
       if (until) { cooling.push(`${p}(재시도 ${kstHm(until)} KST 이후${gUntil ? ', 전역' : ''})`); return false; }
+      // 수집 간격 필터 — 최근 성공 후 최소 간격이 안 지났으면 skip (쿠팡 Akamai
+      // 노출 감소: 30분×48회/일 → 간격 3h 기준 ~8회/일). 새 주문은 다음 간격
+      // 회차가 같은 영업일을 재수집하며 자연 흡수(노심 upsert).
+      const ivUntil = cooldown.successIntervalUntil(cdState, store.storeId, p, nowMs, p === 'coupangeats' ? coupangIntervalMs : 0);
+      if (ivUntil) { cooling.push(`${p}(간격 유지, ${kstHm(ivUntil)} KST 이후)`); return false; }
       return true;
     });
 
@@ -349,7 +393,7 @@ async function runAll({ dryRun }) {
       continue;
     }
 
-    const child = spawnStoreChild({ ...store, platforms: collectPlatforms }, { serverUrl: cfg.serverUrl, targetDate, token });
+    const child = spawnStoreChild({ ...store, platforms: collectPlatforms }, { serverUrl: cfg.serverUrl, targetDate, token, manual: ignoreCooldown });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
   }
