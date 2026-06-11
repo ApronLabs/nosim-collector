@@ -424,8 +424,41 @@ async function runAll({ dryRun }) {
   process.exit(anyFail ? 1 : 0);
 }
 
+// ─── 쿠팡 로그인화면 DOM 수집 (임시 빈 세션으로 로그인 페이지만 떠서 덤프) ───
+// nosim/계정 불필요 — 로그인 페이지는 누구에게나 동일. 현재 살아있는 세션은 안 건드림.
+async function inspectCoupangLogin() {
+  setLogFile(kstToday());
+  log('════════════════════════════════════════');
+  log('  쿠팡 로그인화면 DOM 수집 (임시 세션 = 로그아웃 상태)');
+  log('════════════════════════════════════════');
+  const tmpDir = path.join(os.homedir(), '.poc-coupangeats-logininspect');
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {} // 확실히 로그아웃
+  const runner = new PocRunner('coupangeats', {
+    onStatus: (m) => log(`  · ${m.msg || ''}`),
+    onResult: () => {},
+    onError: (m) => log(`  ❌ ${m.error || ''}`),
+  });
+  try {
+    await runner.run('inspect', 'inspect', {
+      mode: 'daily',
+      targetDate: kstToday(),
+      userDataDir: tmpDir,
+      show: true,
+      inspectLogin: true,
+    });
+    const out = path.join(__dirname, 'coupang-inspect.txt');
+    log(`\n✅ 완료 — ${out} 의 LOGIN-INSPECT 섹션을 확인/공유하세요.`);
+  } catch (err) {
+    log(`\n❌ ${err && err.message ? err.message : err}`);
+  } finally {
+    runner.destroy();
+  }
+  process.exit(0);
+}
+
 // ─── 엔트리 ───
 async function main() {
+  if (hasFlag('inspect-login')) { await inspectCoupangLogin(); return; }
   const storeId = getArg('store');
   if (storeId) {
     // 자식 모드

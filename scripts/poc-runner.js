@@ -88,6 +88,10 @@ class PocRunner {
     if (options.autoLogin) {
       args.push('--auto-login');
     }
+    // coupangeats 로그인화면 DOM 수집(임시 세션): 로그인 페이지 체크박스 구조 덤프
+    if (options.inspectLogin) {
+      args.push('--inspect-login');
+    }
 
     log(`spawn: ${electronPath}`);
     log(`args: ${JSON.stringify(args)}`);
