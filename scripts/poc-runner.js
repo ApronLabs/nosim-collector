@@ -76,6 +76,10 @@ class PocRunner {
     if (options.show) {
       args.push('--show');
     }
+    // coupangeats 진단: 주문페이지 DOM/자체 XHR 덤프 (UI-구동 수집 설계용)
+    if (options.inspect) {
+      args.push('--inspect-coupang');
+    }
 
     log(`spawn: ${electronPath}`);
     log(`args: ${JSON.stringify(args)}`);

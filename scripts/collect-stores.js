@@ -175,6 +175,8 @@ function pocOptionsFor(platform, storeId) {
     // 살아있는 세션 재사용으로 봇감지 회피. 세션 만료 시 --show 창에서 1회 수동 로그인.
     opts.userDataDir = path.join(os.homedir(), `.poc-coupangeats-session-${String(storeId).slice(0, 8)}`);
     opts.show = true; // Akamai 회피 + 세션 만료 시 수동 로그인 창
+    // --inspect-coupang: 주문페이지 DOM/자체 XHR 덤프(coupang-inspect.txt). UI-구동 수집 설계용.
+    if (hasFlag('inspect-coupang')) opts.inspect = true;
   }
   return opts;
 }
@@ -272,6 +274,8 @@ function spawnStoreChild(store, { serverUrl, targetDate, token, manual }) {
     `--sessionToken=${token}`,
     // 수동 실행(백필/--force)은 쿠팡 지터 없이 즉시 수집.
     ...(manual ? ['--manual'] : []),
+    // 진단 플래그는 자식까지 전파 (쿠팡 워커 옵션은 자식의 pocOptionsFor 에서 결정됨).
+    ...(hasFlag('inspect-coupang') ? ['--inspect-coupang'] : []),
   ];
   return spawn(process.execPath, args, { stdio: 'inherit' });
 }
