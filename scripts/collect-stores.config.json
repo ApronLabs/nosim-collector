@@ -2,5 +2,6 @@
   "serverUrl": "https://no-sim.co.kr",
   "collectTime": "11:00",
   "coupangIntervalHours": 3,
-  "_comment": "수집 대상 = 노심 전체 매장(동적). 노심 UI 에서 매장별 배달앱/POS 계정만 등록하면 자동 수집됨. 계정 없는 매장은 자동 skip. 비밀번호는 여기 적지 않음(노심 API 로 복호화 fetch). 특정 매장만 강제하려면 stores 배열 추가(백필용). coupangIntervalHours: 쿠팡 성공 후 최소 재수집 간격(Akamai 노출 감소, 0=비활성)."
+  "coupangUiDrive": false,
+  "_comment": "수집 대상 = 노심 전체 매장(동적). 노심 UI 에서 매장별 배달앱/POS 계정만 등록하면 자동 수집됨. 계정 없는 매장은 자동 skip. 비밀번호는 여기 적지 않음(노심 API 로 복호화 fetch). 특정 매장만 강제하려면 stores 배열 추가(백필용). coupangIntervalHours: 쿠팡 성공 후 최소 재수집 간격(Akamai 노출 감소, 0=비활성). coupangUiDrive: true 면 쿠팡을 UI-구동(페이지 자체 XHR+실제 다음클릭, 가장 사람다움)으로 수집. 깨지면 Slack 알림 후 수동수집. nosim.cmd 메뉴9 로 1회 테스트 가능."
 }

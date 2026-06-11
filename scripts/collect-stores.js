@@ -177,6 +177,8 @@ function pocOptionsFor(platform, storeId) {
     opts.show = true; // Akamai 회피 + 세션 만료 시 수동 로그인 창
     // --inspect-coupang: 주문페이지 DOM/자체 XHR 덤프(coupang-inspect.txt). UI-구동 수집 설계용.
     if (hasFlag('inspect-coupang')) opts.inspect = true;
+    // --ui-drive: 페이지 자체 XHR 캡처 + 실제 '다음' 클릭(가장 사람다움). config.coupangUiDrive 로도 켬.
+    if (hasFlag('ui-drive')) opts.uiDrive = true;
   }
   return opts;
 }
@@ -263,7 +265,7 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
 }
 
 // ─── 부모: 매장 순차 (각 매장 독립 자식 프로세스) ───
-function spawnStoreChild(store, { serverUrl, targetDate, token, manual }) {
+function spawnStoreChild(store, { serverUrl, targetDate, token, manual, uiDrive }) {
   const args = [
     __filename,
     `--store=${store.storeId}`,
@@ -274,8 +276,9 @@ function spawnStoreChild(store, { serverUrl, targetDate, token, manual }) {
     `--sessionToken=${token}`,
     // 수동 실행(백필/--force)은 쿠팡 지터 없이 즉시 수집.
     ...(manual ? ['--manual'] : []),
-    // 진단 플래그는 자식까지 전파 (쿠팡 워커 옵션은 자식의 pocOptionsFor 에서 결정됨).
+    // 진단/UI-구동 플래그는 자식까지 전파 (쿠팡 워커 옵션은 자식의 pocOptionsFor 에서 결정됨).
     ...(hasFlag('inspect-coupang') ? ['--inspect-coupang'] : []),
+    ...(uiDrive ? ['--ui-drive'] : []),
   ];
   return spawn(process.execPath, args, { stdio: 'inherit' });
 }
@@ -285,6 +288,8 @@ function waitExit(child) {
 
 async function runAll({ dryRun }) {
   const cfg = loadConfig();
+  // 쿠팡 UI-구동 수집: config.coupangUiDrive 또는 --ui-drive 플래그. (백필은 워커가 raw fetch 로 처리)
+  const uiDrive = hasFlag('ui-drive') || !!cfg.coupangUiDrive;
   // 매장별 영업일(closingTime cutoff) 기준으로 수집. 시간 윈도우 없이 30분마다 항상 "현재 영업일"을 재수집한다.
   // 새벽 마감 매장(월하화 02:00→cutoff 3)은 자정~03:00 에도 현재 영업일=전날 이라 마감 후에도 한 번 더
   // 수집돼 자연히 완전값으로 채워진다(별도 finalize 불필요). 중복/재수집은 노심 upsert 가 흡수.
@@ -394,7 +399,7 @@ async function runAll({ dryRun }) {
       continue;
     }
 
-    const child = spawnStoreChild({ ...store, platforms: collectPlatforms }, { serverUrl: cfg.serverUrl, targetDate, token, manual: ignoreCooldown });
+    const child = spawnStoreChild({ ...store, platforms: collectPlatforms }, { serverUrl: cfg.serverUrl, targetDate, token, manual: ignoreCooldown, uiDrive });
     const code = await waitExit(child);
     summary.push({ store: store.name, code });
   }

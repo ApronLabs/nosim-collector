@@ -80,6 +80,10 @@ class PocRunner {
     if (options.inspect) {
       args.push('--inspect-coupang');
     }
+    // coupangeats UI-구동 수집: 페이지 자체 XHR 캡처 + 실제 '다음' 클릭
+    if (options.uiDrive) {
+      args.push('--ui-drive');
+    }
 
     log(`spawn: ${electronPath}`);
     log(`args: ${JSON.stringify(args)}`);
