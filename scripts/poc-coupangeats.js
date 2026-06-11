@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
 const { sweepMissingDates } = require('./lib/date-sweep');
+const { rnd, jitter, buildUserAgent } = require('./lib/human');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('coupangeats');
 
@@ -48,6 +49,10 @@ function log(msg) {
   fs.appendFileSync(LOG_FILE, line + '\n');
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// 사람 같은 분산 대기 — 고정 round-number sleep 의 기계적 등간격은 Akamai 행동센서의
+// 봇신호. hsleep(a,b)=구간 난수, jsleep(base)=base 중심 ±20% 흔든 대기.
+const hsleep = (a, b) => sleep(rnd(a, b));
+const jsleep = base => sleep(jitter(base));
 process.on('uncaughtException', err => {
   if (err.code === 'EPIPE') return;
   fs.appendFileSync(LOG_FILE, `[FATAL] ${err.message}\n`);
@@ -158,20 +163,39 @@ async function sendToSalesKeeper(platform, targetDate, shopId, shopName, orders)
 /* ─────────────────────── 공통 스크립트 ─────────────────────── */
 
 function jsLogin(id, pw) {
+  // 사람 타이핑 모사: 글자별 70~190ms(가끔 망설임) 지연 + 자연스러운 focus/blur.
+  // 0ms 연타는 강한 봇신호라 자동입력(--auto-login) 시에도 사람 분포로 친다.
   return `(async function(){
-    const s=ms=>new Promise(r=>setTimeout(r,ms));await s(2000);
+    const s=ms=>new Promise(r=>setTimeout(r,ms));
+    const rn=(a,b)=>Math.floor(a+Math.random()*(b-a));
+    await s(rn(1500,2700));
     const i=document.getElementById('loginId'),p=document.getElementById('password');
     if(!i||!p)return{success:false,error:'no form'};
-    function t(el,v){el.focus();el.click();
+    async function t(el,v){el.focus();el.click();await s(rn(180,460));
       const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
       set.call(el,'');el.dispatchEvent(new Event('input',{bubbles:true}));
-      for(let c=0;c<v.length;c++){set.call(el,el.value+v[c]);el.dispatchEvent(new Event('input',{bubbles:true}));}
-      el.dispatchEvent(new Event('change',{bubbles:true}));}
-    t(i,${JSON.stringify(id)});await s(300);t(p,${JSON.stringify(pw)});await s(500);
+      for(let c=0;c<v.length;c++){
+        set.call(el,el.value+v[c]);
+        el.dispatchEvent(new Event('input',{bubbles:true}));
+        el.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true,key:v[c]}));
+        await s(rn(70,190)+(Math.random()<0.08?rn(150,400):0));
+      }
+      el.dispatchEvent(new Event('change',{bubbles:true}));el.blur();}
+    await t(i,${JSON.stringify(id)});await s(rn(450,950));
+    await t(p,${JSON.stringify(pw)});await s(rn(500,1100));
     const b=Array.from(document.querySelectorAll('button')).find(b=>b.innerText.trim()==='로그인');
-    if(!b)return{success:false,error:'no btn'};b.click();return{success:true};
+    if(!b)return{success:false,error:'no btn'};
+    await s(rn(220,600));b.click();return{success:true};
   })()`;
 }
+
+// 페이지 안에서 사람처럼 살짝 스크롤(읽는 척) — 행동 엔트로피용.
+const JS_HUMAN_SCROLL = `(async function(){
+  const s=ms=>new Promise(r=>setTimeout(r,ms));
+  const steps=2+Math.floor(Math.random()*3);
+  for(let k=0;k<steps;k++){window.scrollBy(0,120+Math.floor(Math.random()*260));await s(200+Math.floor(Math.random()*500));}
+  await s(150+Math.floor(Math.random()*350));window.scrollTo(0,0);return true;
+})()`;
 
 const JS_DISMISS = `(function(){
   let c=0;
@@ -290,7 +314,8 @@ const JS_FIND_STORES = `(async function(){
 function jsFetchOrders(storeId, startMs, endMs) {
   return `(async function(){
     try {
-      // x-request-meta 생성 (Akamai 우회용)
+      // x-request-meta — 쿠팡 주문 API 가 요구하는 메타 헤더. 사이트 프런트엔드가
+      // 보내는 것과 동일 형식을 그대로 동봉(스푸핑 아님, 정상 요청 재현).
       const meta = btoa(JSON.stringify({
         o: location.origin,
         ua: navigator.userAgent.substring(0, navigator.userAgent.indexOf('Chrome/') + 12),
@@ -338,6 +363,23 @@ function nav(url, t=30000) {
 }
 const isLogin = u => u.includes('/login') || u.includes('/signin');
 
+// 사람 같은 마우스 이동 — 실제 OS 입력 이벤트(sendInputEvent)라 Akamai 센서가 포인터
+// 엔트로피로 기록한다. 보이는 창(--show)에서만 의미 있어 그때만 수행. 실패는 무시.
+async function humanMouse(moves = 3) {
+  if (!SHOW || !mainWindow || !webView) return;
+  try {
+    const [w, h] = mainWindow.getContentSize();
+    let x = rnd(40, Math.max(60, w - 40));
+    let y = rnd(70, Math.max(100, h - 70));
+    for (let k = 0; k < moves; k++) {
+      x = Math.min(w - 5, Math.max(5, x + rnd(-180, 180)));
+      y = Math.min(h - 5, Math.max(5, y + rnd(-140, 140)));
+      webView.webContents.sendInputEvent({ type: 'mouseMove', x, y });
+      await sleep(rnd(60, 180));
+    }
+  } catch { /* 입력 이벤트 실패는 수집을 막지 않는다 */ }
+}
+
 // Akamai 차단/throttle 문구가 현재 페이지에 떠 있나 (봇감지 신호 — 보이면 즉시 중단).
 async function hasBlockText() {
   try {
@@ -375,10 +417,16 @@ async function collectStore(name, id, dr) {
   // 주문 페이지로 이동 (쿠키가 해당 매장 컨텍스트에 세팅되도록)
   const url = `https://store.coupangeats.com/merchant/management/orders/${id}`;
   await nav(url);
-  await sleep(5000);
+  await jsleep(5000);
   await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
-  await sleep(1000);
+  await jsleep(1000);
   await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
+
+  // 사람처럼 잠깐 머무르며(마우스/스크롤) 페이지를 본 뒤 조회 — 페이지 로드 직후 즉시
+  // API 난사는 기계적 신호. 행동 엔트로피 + dwell 로 정상 사용자 패턴에 가깝게.
+  await humanMouse(rnd(2, 5));
+  await webView.webContents.executeJavaScript(JS_HUMAN_SCROLL).catch(()=>{});
+  await hsleep(1200, 3200);
 
   // XHR API 호출 (JSON.stringify로 반환 → JSON.parse로 파싱, 직렬화 문제 방지)
   log(`   API 호출: storeId=${id}, ${dr.startDash}(${dr.startMs}) ~ ${dr.endDash}(${dr.endMs})`);
@@ -412,6 +460,8 @@ async function collectStore(name, id, dr) {
   if (totalOrderCount > PAGE_SIZE) {
     const totalPages = Math.ceil(totalOrderCount / PAGE_SIZE);
     for (let page = 1; page < totalPages; page++) {
+      // 페이지 간 사람 같은 간격 — 연속 API 난사(rate 신호) 완화.
+      await hsleep(700, 2100);
       log(`   추가 페이지 ${page}/${totalPages - 1} 호출... (0-indexed)`);
       const pageResultStr = await webView.webContents.executeJavaScript(`(async function(){
         try {
@@ -576,15 +626,21 @@ app.whenReady().then(async () => {
     const ses = webView.webContents.session;
     // 세션 영속 — clearStorageData 제거. 매장별 user-data-dir 로 계정 격리(공유 시 다른
     // 매장 계정 세션 오염 방지, baemin 과 동일 패턴). 살아있는 세션은 재사용해 봇감지 회피.
-    const ua = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+    //
+    // UA 는 실제 OS + 실제 Chromium 메이저로 생성. 기존엔 Windows 수집 PC 에서도 Mac UA 를
+    // 하드코딩 → navigator.platform(Win32) 불일치(봇신호)였다. Electron/앱 토큰도 제거된다.
+    const ua = buildUserAgent(process.platform, process.versions.chrome);
+    log(`   UA: ${ua}`);
     ses.setUserAgent(ua); webView.webContents.setUserAgent(ua);
 
     // ── 1) 로그인 (세션 우선) ──
     emit('status', { msg: '쿠팡이츠 세션 확인 중...' });
     log('1) 세션 확인...');
     await nav('https://store.coupangeats.com/merchant/login');
-    log('   Akamai 10초...');
-    await sleep(10000);
+    log('   Akamai 센서 대기(~10초)...');
+    // Akamai JS 센서가 돌며 _abck/bm_sz 를 세팅할 시간. 고정 10초는 기계적이라 분산.
+    await jsleep(10000);
+    await humanMouse(rnd(2, 4));
     let url = webView.webContents.getURL();
 
     // Akamai 차단 문구가 화면에 떠 있으면 = 봇감지/throttle → 즉시 중단(재시도가 차단을 키움).
@@ -601,7 +657,7 @@ app.whenReady().then(async () => {
         const hf = await webView.webContents.executeJavaScript(`({i:!!document.getElementById('loginId'),p:!!document.getElementById('password')})`);
         if (hf.i && hf.p) {
           const lr = await webView.webContents.executeJavaScript(jsLogin(config.id, config.pw));
-          if (lr.success) { log('   자동 로그인 제출 — 응답 10초...'); await sleep(10000); url = webView.webContents.getURL(); }
+          if (lr.success) { log('   자동 로그인 제출 — 응답 대기...'); await jsleep(10000); url = webView.webContents.getURL(); }
         }
       }
       // b) 세션 만료 → 수동 로그인 대기(--show). 통과 후 세션이 user-data-dir 에 저장됨.
@@ -629,16 +685,17 @@ app.whenReady().then(async () => {
     const defId = (url.match(/\/(\d+)$/) || [])[1] || '';
     log(`   기본 storeId: ${defId}`);
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
-    await sleep(1000);
+    await jsleep(1000);
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
 
     // ── 2) 매장 탐색 ──
     emit('status', { msg: '매장 탐색 중...' });
     log('\n2) 매장 탐색...');
     await nav(`https://store.coupangeats.com/merchant/management/home/${defId}`);
-    await sleep(5000);
+    await jsleep(5000);
+    await humanMouse(rnd(1, 3));
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
-    await sleep(2000);
+    await jsleep(2000);
     await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
 
     // 매장 페이지에 Akamai/오류 토스트(매장목록 실패·페이지 작동안함)면 throttle → 즉시 중단.
@@ -656,9 +713,9 @@ app.whenReady().then(async () => {
       for (const s of stores) {
         if (!s.storeId) {
           await nav(`https://store.coupangeats.com/merchant/management/home/${defId}`);
-          await sleep(4000);
+          await jsleep(4000);
           await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
-          await sleep(1000);
+          await jsleep(1000);
           await webView.webContents.executeJavaScript(`(async function(){
             const s=ms=>new Promise(r=>setTimeout(r,ms));
             const sel = document.querySelector('.home-store-selector .button.extend-select') ||
@@ -675,7 +732,7 @@ app.whenReady().then(async () => {
               }
             }
           })()`);
-          await sleep(5000);
+          await jsleep(5000);
           const newUrl = webView.webContents.getURL();
           const idMatch = newUrl.match(/\/(\d{5,})/);
           if (idMatch && idMatch[1] !== defId) {
@@ -721,6 +778,8 @@ app.whenReady().then(async () => {
     const results = [];
     for (let i = 0; i < stores.length; i++) {
       const st = stores[i];
+      // 매장 간 사람 같은 간격 — 매장들을 즉시 연속 조회하면 기계적. (첫 매장은 바로)
+      if (i > 0) await hsleep(3000, 7000);
       log(`\n======== 매장 ${i+1}/${stores.length}: ${st.storeName} (${st.storeId}) ========`);
       emit('status', { msg: `${st.storeName} 주문 조회 중... (API)` });
       try {
