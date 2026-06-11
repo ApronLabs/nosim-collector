@@ -10,6 +10,7 @@ const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
 const { sweepMissingDates } = require('./lib/date-sweep');
 const { rnd, jitter, buildUserAgent } = require('./lib/human');
+const { ordersInRange, shouldStopPaging } = require('./lib/coupang-paging');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('coupangeats');
 
@@ -40,6 +41,10 @@ const AUTO_LOGIN = process.argv.includes('--auto-login');
 // 진단 모드 — 주문페이지의 실제 DOM(버튼/날짜/페이지네이션) + 페이지 자체 XHR 캡처를
 // 별도 파일에 덤프. UI-구동 수집(#3) 을 정확히 만들기 위한 화면 구조 확보용. 수집은 평소대로 진행.
 const UI_INSPECT = process.argv.includes('--inspect-coupang');
+// UI-구동 수집 — raw fetch 대신, 주문페이지로 들어가면 페이지가 스스로 쏘는 주문 XHR(가장
+// 사람다움)을 preload 로 가로채 사용하고, 다음 페이지는 실제 '다음' 버튼 클릭. 깨지면(화면 변경)
+// 명확히 throw → exit 1 → 노심 보고 → Slack(사장님 안전망). daily 모드만 대상(백필은 raw fetch).
+const UI_DRIVE = process.argv.includes('--ui-drive');
 const LOG_FILE = path.join(__dirname, 'poc-coupangeats-log.txt');
 const INSPECT_FILE = path.join(__dirname, 'coupang-inspect.txt');
 
@@ -459,6 +464,102 @@ async function dumpInspect(name, id) {
   }
 }
 
+/* ─────────── UI-구동 수집 (#3): 페이지 자체 XHR 캡처 + 실제 '다음' 클릭 ─────────── */
+// preload(coupang-preload.js)가 모은 페이지 자체 주문 응답을 읽는다.
+async function readCaptures() {
+  try {
+    const raw = await webView.webContents.executeJavaScript('JSON.stringify(window.__coupangCapture||[])');
+    return JSON.parse(raw) || [];
+  } catch { return []; }
+}
+// 실측 DOM(2026-06-11): ul.merchant-pagination > li > button.pagination-btn.next-btn,
+// 마지막 페이지면 next-btn 에 hide-btn 클래스. clicked|last-page|no-btn 반환.
+const JS_CLICK_NEXT_PAGE = `(function(){
+  var btn=document.querySelector('.merchant-pagination button.next-btn')||document.querySelector('button.pagination-btn.next-btn');
+  if(!btn) return 'no-btn';
+  var cls=(btn.className||'');
+  if(cls.indexOf('hide-btn')!==-1||btn.disabled) return 'last-page';
+  btn.click(); return 'clicked';
+})()`;
+
+// 캡처에서 가장 최근 응답(=방금 클릭/로드로 갱신된 페이지) 추출.
+function latestData(caps) {
+  if (!caps || !caps.length) return null;
+  return caps[caps.length - 1].data || null;
+}
+
+async function collectStoreViaUi(name, id, dr) {
+  log(`\n===== [UI] ${name} (${id}) =====`);
+  const url = `https://store.coupangeats.com/merchant/management/orders/${id}`;
+  // 캡처 비우고 이동 — 페이지가 스스로 주문 XHR 을 쏘면 preload 가 잡는다(클릭→XHR 인과 = 사람).
+  await webView.webContents.executeJavaScript('try{window.__coupangCapture=[]}catch(e){}; true').catch(()=>{});
+  await nav(url);
+  await jsleep(5000);
+  await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
+  await jsleep(1000);
+  await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
+  if (await hasBlockText()) {
+    throw new Error('Akamai 차단 감지(매장 주문페이지 권한 없음) — 즉시 중단');
+  }
+
+  // 사람처럼 읽기(마우스/스크롤/dwell)
+  await humanMouse(rnd(3, 6));
+  await webView.webContents.executeJavaScript(JS_HUMAN_SCROLL).catch(()=>{});
+  await hsleep(2500, 6000);
+
+  // 페이지 자동조회 응답 대기
+  let caps = await readCaptures();
+  let waited = 0;
+  while (caps.length === 0 && waited < 12000) { await sleep(1000); waited += 1000; caps = await readCaptures(); }
+  if (caps.length === 0) {
+    throw new Error('쿠팡 UI 자동조회 응답 캡처 실패 — 화면 변경/차단 의심, 수집기 점검 필요(nosim.cmd 메뉴8 진단)');
+  }
+
+  // 페이지 기본 조회는 newest-first 의 "최근 며칠" 범위(실측 확인). 날짜선택기 안 건드리고,
+  // 우리 target 일자 구간만 모은다. 판단 로직은 lib/coupang-paging(순수, 테스트됨).
+  const first = latestData(caps) || {};
+  const totalSalePrice = first.totalSalePrice || 0;
+  const rangeTotal = first.totalOrderCount || first.orderPageVo?.totalElements || 0;
+  const PAGE_SIZE = 10;
+  const maxPages = Math.max(1, Math.ceil((rangeTotal || 0) / PAGE_SIZE)) + 2; // 안전 상한
+  const collected = [];
+  let pageData = first;
+  let pageNum = 0;
+  while (true) {
+    const content = pageData.orderPageVo?.content || pageData.content || [];
+    const inTarget = ordersInRange(content, dr.startMs, dr.endMs);
+    collected.push(...inTarget);
+    log(`   [UI] page ${pageNum}: ${content.length}건 중 target ${inTarget.length}건`);
+    // 빈 페이지(0건 매장/데이터 끝)는 페이지네이션 컨트롤이 없을 수 있으므로 여기서 종료 —
+    // '다음 버튼 못 찾음' 오탐 방지(예: 주문 0건인 샵인샵 매장).
+    if (content.length === 0) break;
+    if (shouldStopPaging(content, dr.startMs)) break; // 다음은 더 과거뿐 → 종료(날짜선택기 불필요의 핵심)
+    if (pageNum + 1 >= maxPages) break;     // 안전 상한
+    // 실제 '다음' 버튼 클릭 → 페이지가 새 주문 XHR 발생
+    await humanMouse(rnd(1, 3));
+    await hsleep(2500, 6500);
+    const before = (await readCaptures()).length;
+    const r = await webView.webContents.executeJavaScript(JS_CLICK_NEXT_PAGE);
+    if (r === 'last-page') break;
+    if (r === 'no-btn') {
+      throw new Error(`쿠팡 페이지네이션 '다음' 버튼 못 찾음(page ${pageNum}) — 화면 변경, 수집기 점검 필요`);
+    }
+    // 클릭 후 새 응답 대기
+    let w = 0; let cc = await readCaptures();
+    while (cc.length <= before && w < 10000) { await sleep(500); w += 500; cc = await readCaptures(); }
+    if (cc.length <= before) {
+      throw new Error(`쿠팡 페이지 ${pageNum + 1} 응답 미수신(클릭 후) — 차단/화면 변경 의심`);
+    }
+    if (await hasBlockText()) {
+      throw new Error('Akamai 차단 감지(페이지 이동 중 권한 없음) — 즉시 중단');
+    }
+    pageData = latestData(cc) || {};
+    pageNum++;
+  }
+  log(`   [UI] target ${dr.startDash}~${dr.endDash} 수집: ${collected.length}건 (페이지 범위 전체 ${rangeTotal}건 중)`);
+  return await processAndSend({ name, id, dr, allOrders: collected, totalOrderCount: collected.length, totalSalePrice });
+}
+
 /* ─────────── 매장별 수집 (XHR API) ─────────── */
 async function collectStore(name, id, dr) {
   log(`\n===== ${name} (${id}) =====`);
@@ -572,6 +673,12 @@ async function collectStore(name, id, dr) {
     }
   }
 
+  return await processAndSend({ name, id, dr, allOrders, totalOrderCount, totalSalePrice });
+}
+
+// 공통 처리부: 수집된 주문(allOrders) → 통일 포맷 변환 · 날짜별 그룹핑 · 매출지킴이 전송 · 반환.
+// raw-fetch(collectStore) 와 UI-구동(collectStoreViaUi) 양쪽이 이걸 호출한다.
+async function processAndSend({ name, id, dr, allOrders, totalOrderCount, totalSalePrice }) {
   log(`   총 수신: ${allOrders.length}건`);
 
   // DUMP_RAW=1 시 raw 응답 샘플 수집
@@ -691,9 +798,9 @@ app.whenReady().then(async () => {
 
   mainWindow = new BrowserWindow({ width: 1200, height: 900, show: SHOW });
   mainWindow.loadURL('about:blank');
-  // 진단 모드에서만 preload(주문 XHR 캡처) 주입 — 평소 수집 동작은 그대로 유지.
+  // 진단/UI-구동 모드에서 preload(주문 XHR 캡처) 주입 — 평소 raw-fetch 수집은 그대로 유지.
   const webPreferences = { contextIsolation: false, nodeIntegration: false };
-  if (UI_INSPECT) webPreferences.preload = path.join(__dirname, 'coupang-preload.js');
+  if (UI_INSPECT || UI_DRIVE) webPreferences.preload = path.join(__dirname, 'coupang-preload.js');
   webView = new WebContentsView({ webPreferences });
   mainWindow.contentView.addChildView(webView);
   const [w, h] = mainWindow.getContentSize();
@@ -851,7 +958,10 @@ app.whenReady().then(async () => {
       emit('shop', { shopName: s.storeName, shopId: s.storeId });
     }
 
-    // ── 3) 매장별 수집 (XHR API) ──
+    // ── 3) 매장별 수집 ──
+    // UI-구동(--ui-drive, daily 모드): 페이지 자체 XHR 캡처 + 실제 '다음' 클릭. 백필(daily 아님)은 raw fetch.
+    const useUi = UI_DRIVE && config.mode === 'daily';
+    log(useUi ? '   [모드] UI-구동 수집' : '   [모드] raw-fetch 수집');
     const results = [];
     for (let i = 0; i < stores.length; i++) {
       const st = stores[i];
@@ -859,18 +969,19 @@ app.whenReady().then(async () => {
       // 샵인샵 다중매장을 5초 간격으로 연속 조회하던 게 "권한 없음"의 주요 트리거였다.
       if (i > 0) await hsleep(12000, 35000);
       log(`\n======== 매장 ${i+1}/${stores.length}: ${st.storeName} (${st.storeId}) ========`);
-      emit('status', { msg: `${st.storeName} 주문 조회 중... (API)` });
+      emit('status', { msg: `${st.storeName} 주문 조회 중...${useUi ? ' (UI)' : ' (API)'}` });
       try {
-        results.push(await collectStore(st.storeName, st.storeId, dr));
+        results.push(await (useUi ? collectStoreViaUi : collectStore)(st.storeName, st.storeId, dr));
       } catch (err) {
         const msg = err?.message || String(err);
         log(`   ERROR: ${msg}`);
         results.push({ storeName: st.storeName, storeId: st.storeId, error: msg,
           orders: [], dailySummaries: [], totalOrders: 0 });
-        // Akamai 차단/throttle 이면 남은 매장을 더 두드리지 않고 즉시 중단(하드블록 예방).
-        // 재던져서 메인 catch → exit 1 → collect-stores 가 전역 쿨다운 + Slack 보고.
-        if (/Akamai|권한이 존재하지 않|매장 목록을 불러오지|페이지가 작동하지/.test(msg)) {
-          throw new Error('Akamai 차단으로 남은 매장 수집 중단 — ' + msg);
+        // 중단 조건: ① Akamai 차단/throttle(하드블록 예방) ② UI-구동 실패(화면 변경 — 사장님이
+        // Slack 받고 수동수집 하기로 함). 재던져서 메인 catch → exit 1 → collect-stores 가
+        // 쿨다운 + reportFailure(Slack). UI-구동이 아니고 일반 실패면 다음 매장은 계속 시도.
+        if (useUi || /Akamai|권한이 존재하지 않|매장 목록을 불러오지|페이지가 작동하지/.test(msg)) {
+          throw new Error((useUi ? '쿠팡 UI-구동 수집 실패 — ' : 'Akamai 차단으로 남은 매장 수집 중단 — ') + msg);
         }
       }
     }
