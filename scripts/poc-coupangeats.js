@@ -434,11 +434,13 @@ async function collectStore(name, id, dr) {
     throw new Error('Akamai 차단 감지(매장 주문페이지 권한 없음) — 즉시 중단');
   }
 
-  // 사람처럼 잠깐 머무르며(마우스/스크롤) 페이지를 본 뒤 조회 — 페이지 로드 직후 즉시
-  // API 난사는 기계적 신호. 행동 엔트로피 + dwell 로 정상 사용자 패턴에 가깝게.
-  await humanMouse(rnd(2, 5));
+  // 사람이 주문 목록을 "읽는" 동작 — 마우스로 훑고, 스크롤하며 충분히 머문 뒤 조회.
+  // 페이지 로드 직후 즉시 fetch 난사는 기계적 신호(클릭/마우스 없는 XHR). 행동 엔트로피 +
+  // 넉넉한 dwell 로 정상 사용자 패턴에 가깝게. 샵인샵 다중매장일수록 이 dwell 이 중요.
+  await humanMouse(rnd(3, 6));
   await webView.webContents.executeJavaScript(JS_HUMAN_SCROLL).catch(()=>{});
-  await hsleep(1200, 3200);
+  await hsleep(2500, 6000);
+  await humanMouse(rnd(1, 3));
 
   // XHR API 호출 (JSON.stringify로 반환 → JSON.parse로 파싱, 직렬화 문제 방지)
   log(`   API 호출: storeId=${id}, ${dr.startDash}(${dr.startMs}) ~ ${dr.endDash}(${dr.endMs})`);
@@ -476,8 +478,11 @@ async function collectStore(name, id, dr) {
   if (totalOrderCount > PAGE_SIZE) {
     const totalPages = Math.ceil(totalOrderCount / PAGE_SIZE);
     for (let page = 1; page < totalPages; page++) {
-      // 페이지 간 사람 같은 간격 — 연속 API 난사(rate 신호) 완화.
-      await hsleep(700, 2100);
+      // 사람이 한 페이지(약 10건)를 읽고 다음으로 넘기듯 — 스크롤·마우스 후 충분히 쉰다.
+      // 연속 API 난사는 rate 신호의 핵심이라 페이지네이션을 가장 사람답게 늦춘다.
+      await webView.webContents.executeJavaScript(JS_HUMAN_SCROLL).catch(()=>{});
+      await humanMouse(rnd(1, 3));
+      await hsleep(2500, 6500);
       log(`   추가 페이지 ${page}/${totalPages - 1} 호출... (0-indexed)`);
       const pageResultStr = await webView.webContents.executeJavaScript(`(async function(){
         try {
@@ -797,8 +802,9 @@ app.whenReady().then(async () => {
     const results = [];
     for (let i = 0; i < stores.length; i++) {
       const st = stores[i];
-      // 매장 간 사람 같은 간격 — 매장들을 즉시 연속 조회하면 기계적. (첫 매장은 바로)
-      if (i > 0) await hsleep(3000, 7000);
+      // 매장 전환 간격 — 사람이 한 매장을 충분히 본 뒤 다음으로 넘기듯 넉넉히(12~35s).
+      // 샵인샵 다중매장을 5초 간격으로 연속 조회하던 게 "권한 없음"의 주요 트리거였다.
+      if (i > 0) await hsleep(12000, 35000);
       log(`\n======== 매장 ${i+1}/${stores.length}: ${st.storeName} (${st.storeId}) ========`);
       emit('status', { msg: `${st.storeName} 주문 조회 중... (API)` });
       try {
