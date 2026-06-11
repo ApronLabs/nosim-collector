@@ -12,7 +12,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\collect-control.ps1 -Action status
 #>
 param(
-  [ValidateSet('menu', 'deploy', 'on', 'off', 'test', 'dry', 'status', 'reset-cooldown', 'inspect', 'ui-test')]
+  [ValidateSet('menu', 'deploy', 'on', 'off', 'test', 'dry', 'status', 'reset-cooldown', 'inspect', 'ui-test', 'login-dom')]
   [string]$Action = 'menu'
 )
 
@@ -268,6 +268,24 @@ function Invoke-UiTest {
   else { Write-Note "실패(exit $LASTEXITCODE) — 위 빨간 메시지 확인. 자동수집은 기존 방식 유지(config 안 바꿨으면)." }
 }
 
+# ─── 쿠팡 로그인화면 DOM 수집 (개발용) — '로그인 상태 유지' 체크박스 셀렉터 확정용 ───
+function Invoke-LoginDom {
+  Write-Title '쿠팡 로그인화면 DOM 수집 (개발용)'
+  Assert-Tools
+  Set-Location $repo
+  Write-Dim '임시 빈 세션으로 로그인 페이지만 띄워 체크박스 구조를 떠냅니다.'
+  Write-Dim '지금 살아있는 쿠팡 세션은 안 건드립니다. 로그인은 하지 않습니다(창만 잠깐 뜸).'
+  $node = (Get-Command node).Source
+  & $node 'scripts\collect-stores.js' '--inspect-login'
+  Write-Host ''
+  $f = Join-Path $repo 'scripts\coupang-inspect.txt'
+  if (Test-Path $f) {
+    Write-Ok "생성됨: $f"
+    Write-Note '이 파일의 맨 끝 LOGIN-INSPECT 섹션을 개발자(클로드)에게 그대로 붙여주세요.'
+  }
+  else { Write-Bad '진단 파일이 안 생겼습니다 — 위 메시지를 확인하세요.' }
+}
+
 # ─── 메뉴 루프 ───
 function Show-Menu {
   while ($true) {
@@ -290,6 +308,7 @@ function Show-Menu {
     Write-Host '   7)  쿠팡 쿨다운 초기화' -ForegroundColor White
     Write-Host '   8)  쿠팡 화면 진단   ' -NoNewline -ForegroundColor White; Write-Host '(개발용) 주문페이지 구조 떠서 파일로' -ForegroundColor Gray
     Write-Host '   9)  쿠팡 UI수집 테스트' -NoNewline -ForegroundColor White; Write-Host ' 페이지 자체조회+다음클릭으로 1회 수집' -ForegroundColor Gray
+    Write-Host '  10)  쿠팡 로그인화면 DOM' -NoNewline -ForegroundColor White; Write-Host ' (개발용) 로그인 체크박스 구조만 수집' -ForegroundColor Gray
     Write-Host '   0)  종료' -ForegroundColor White
     Write-Host ('-' * 52) -ForegroundColor DarkGray
     $choice = Read-Host '   번호 선택'
@@ -305,8 +324,9 @@ function Show-Menu {
         '7' { Invoke-ResetCooldown }
         '8' { Invoke-InspectCoupang }
         '9' { Invoke-UiTest }
+        '10' { Invoke-LoginDom }
         '0' { return }
-        default { Write-Note '1~9 또는 0 을 입력하세요.' }
+        default { Write-Note '1~10 또는 0 을 입력하세요.' }
       }
     }
     catch {
@@ -330,6 +350,7 @@ try {
     'reset-cooldown' { Invoke-ResetCooldown }
     'inspect'        { Invoke-InspectCoupang }
     'ui-test'        { Invoke-UiTest }
+    'login-dom'      { Invoke-LoginDom }
   }
 }
 catch {

@@ -45,6 +45,9 @@ const UI_INSPECT = process.argv.includes('--inspect-coupang');
 // 사람다움)을 preload 로 가로채 사용하고, 다음 페이지는 실제 '다음' 버튼 클릭. 깨지면(화면 변경)
 // 명확히 throw → exit 1 → 노심 보고 → Slack(사장님 안전망). daily 모드만 대상(백필은 raw fetch).
 const UI_DRIVE = process.argv.includes('--ui-drive');
+// 로그인화면 DOM 수집 모드 — 임시 빈 세션(로그아웃)으로 로그인 페이지만 떠서 체크박스 DOM 을
+// coupang-inspect.txt 에 덤프하고 종료. 수집/로그인 안 함. '로그인 상태 유지' 셀렉터 확정용.
+const INSPECT_LOGIN = process.argv.includes('--inspect-login');
 const LOG_FILE = path.join(__dirname, 'poc-coupangeats-log.txt');
 const INSPECT_FILE = path.join(__dirname, 'coupang-inspect.txt');
 
@@ -848,6 +851,26 @@ app.whenReady().then(async () => {
     const ua = buildUserAgent(process.platform, process.versions.chrome);
     log(`   UA: ${ua}`);
     ses.setUserAgent(ua); webView.webContents.setUserAgent(ua);
+
+    // ── [로그인화면 DOM 수집 모드] 임시 빈 세션이라 로그인 페이지가 떠야 정상. DOM 덤프 후 종료.
+    if (INSPECT_LOGIN) {
+      emit('status', { msg: '쿠팡 로그인화면 DOM 수집 중...' });
+      log('1) [로그인진단] 로그인 페이지 이동...');
+      await nav('https://store.coupangeats.com/merchant/login');
+      log('   Akamai 센서 대기(~10초)...');
+      await jsleep(10000);
+      const blocked = await hasBlockText();
+      const curUrl = webView.webContents.getURL();
+      const dump = await webView.webContents.executeJavaScript(JS_DUMP_LOGIN).catch((e) => JSON.stringify({ error: String(e) }));
+      const header = `\n===== LOGIN-INSPECT ${new Date().toISOString()} (blocked=${blocked}, url=${curUrl}, isLogin=${isLogin(curUrl)}) =====\n`;
+      try { fs.appendFileSync(INSPECT_FILE, header + dump + '\n'); } catch {}
+      log(`   로그인화면 덤프: ${dump}`);
+      if (!isLogin(curUrl)) log('   ⚠️ 로그인 페이지가 아님(임시 세션인데 로그인 상태?) — 덤프가 비어있을 수 있음');
+      emit('status', { msg: `로그인화면 DOM 덤프 완료: coupang-inspect.txt` });
+      emit('done', {});
+      setTimeout(() => app.exit(0), 3000);
+      return;
+    }
 
     // ── 1) 로그인 (세션 우선) ──
     emit('status', { msg: '쿠팡이츠 세션 확인 중...' });
