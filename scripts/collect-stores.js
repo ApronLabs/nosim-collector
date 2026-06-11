@@ -34,6 +34,7 @@ try { require('dotenv').config({ path: path.join(__dirname, '..', '.env') }); } 
 
 const PocRunner = require('./poc-runner');
 const cooldown = require('./lib/cooldown');
+const { sumOrders } = require('./lib/result-count');
 
 // ─── 인자 파싱 ───
 function getArg(name) {
@@ -178,10 +179,6 @@ function pocOptionsFor(platform, storeId) {
   return opts;
 }
 
-function sumOrders(resultMsg) {
-  if (!resultMsg || !Array.isArray(resultMsg.shops)) return null;
-  return resultMsg.shops.reduce((acc, s) => acc + (s.totalOrders || 0), 0);
-}
 
 // ─── 자식: 한 매장의 플랫폼들을 순차 수집 ───
 async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, token }) {
