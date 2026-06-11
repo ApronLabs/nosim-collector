@@ -39,6 +39,11 @@ const SHOW = process.argv.includes('--show');
 const AUTO_LOGIN = process.argv.includes('--auto-login');
 const LOG_FILE = path.join(__dirname, 'poc-coupangeats-log.txt');
 
+// 프로세스 종료 코드. 에러/차단으로 끝나면 1 로 두고 app.exit(1) → poc-runner 가 reject
+// → collect-stores 가 실패로 인식(throttle 이면 전역 쿨다운 + Slack 보고). 과거엔 무조건
+// app.quit()(코드 0)이라 차단당해도 "성공"으로 오인돼 #58/#61 안전망이 무력화됐다.
+let exitCode = 0;
+
 // ── stdout JSON 프로토콜 ──
 function emit(type, data) {
   console.log(JSON.stringify({ type, ...data }));
@@ -422,6 +427,13 @@ async function collectStore(name, id, dr) {
   await jsleep(1000);
   await webView.webContents.executeJavaScript(JS_DISMISS).catch(()=>{});
 
+  // 매장 주문페이지에 Akamai 차단 문구(권한 없음/페이지 오류)가 떠 있으면 즉시 중단.
+  // 밀어붙여 다음 매장·페이지를 계속 두드리면 하드블록으로 번진다. 메시지에 'Akamai' 를
+  // 넣어 collect-stores 의 isThrottleError 가 잡아 전역 쿨다운을 걸게 한다.
+  if (await hasBlockText()) {
+    throw new Error('Akamai 차단 감지(매장 주문페이지 권한 없음) — 즉시 중단');
+  }
+
   // 사람처럼 잠깐 머무르며(마우스/스크롤) 페이지를 본 뒤 조회 — 페이지 로드 직후 즉시
   // API 난사는 기계적 신호. 행동 엔트로피 + dwell 로 정상 사용자 패턴에 가깝게.
   await humanMouse(rnd(2, 5));
@@ -434,6 +446,10 @@ async function collectStore(name, id, dr) {
   const apiResult = JSON.parse(apiResultStr);
 
   if (!apiResult.success) {
+    // 403/429 = Akamai 차단/레이트리밋 → throttle 로 표시해 즉시 중단(전역 쿨다운).
+    if (apiResult.status === 403 || apiResult.status === 429) {
+      throw new Error(`Akamai 차단(주문 API ${apiResult.status}) — 즉시 중단`);
+    }
     throw new Error(`API 호출 실패: ${apiResult.error}`);
   }
 
@@ -481,7 +497,7 @@ async function collectStore(name, id, dr) {
               endDate: ${dr.endMs}
             })
           });
-          if (!res.ok) return JSON.stringify({ success: false, error: 'HTTP ' + res.status });
+          if (!res.ok) return JSON.stringify({ success: false, error: 'HTTP ' + res.status, status: res.status });
           const data = await res.json();
           return JSON.stringify({ success: true, content: data.orderPageVo?.content || [] });
         } catch (err) {
@@ -492,6 +508,9 @@ async function collectStore(name, id, dr) {
       if (pageResult.success) {
         log(`   페이지 ${page}: ${pageResult.content.length}건`);
         allOrders.push(...pageResult.content);
+      } else if (pageResult.status === 403 || pageResult.status === 429) {
+        // 페이지네이션 중 차단 → 더 두드리지 말고 즉시 중단(전역 쿨다운 유도).
+        throw new Error(`Akamai 차단(페이지 ${page} API ${pageResult.status}) — 즉시 중단`);
       } else {
         log(`   페이지 ${page} 실패: ${pageResult.error}`);
       }
@@ -607,7 +626,7 @@ app.whenReady().then(async () => {
 
   if (!config.id || !config.pw) {
     emit('error', { error: '--id=ID --pw=PW 필요' });
-    app.quit(); return;
+    app.exit(1); return;
   }
 
   const dr = getDateRangeByMode();
@@ -785,9 +804,15 @@ app.whenReady().then(async () => {
       try {
         results.push(await collectStore(st.storeName, st.storeId, dr));
       } catch (err) {
-        log(`   ERROR: ${err?.message || err}`);
-        results.push({ storeName: st.storeName, storeId: st.storeId, error: err?.message || String(err),
+        const msg = err?.message || String(err);
+        log(`   ERROR: ${msg}`);
+        results.push({ storeName: st.storeName, storeId: st.storeId, error: msg,
           orders: [], dailySummaries: [], totalOrders: 0 });
+        // Akamai 차단/throttle 이면 남은 매장을 더 두드리지 않고 즉시 중단(하드블록 예방).
+        // 재던져서 메인 catch → exit 1 → collect-stores 가 전역 쿨다운 + Slack 보고.
+        if (/Akamai|권한이 존재하지 않|매장 목록을 불러오지|페이지가 작동하지/.test(msg)) {
+          throw new Error('Akamai 차단으로 남은 매장 수집 중단 — ' + msg);
+        }
       }
     }
 
@@ -813,8 +838,9 @@ app.whenReady().then(async () => {
   } catch (err) {
     log(`\nERROR: ${err?.message || err}`);
     emit('error', { error: err?.message || String(err) });
+    exitCode = 1; // 실패/차단 → 비정상 종료로 알려 collect-stores 가 쿨다운·보고하게 함
   }
-  setTimeout(() => app.quit(), 5000);
+  setTimeout(() => app.exit(exitCode), 5000);
 });
 
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', () => app.exit(exitCode));
