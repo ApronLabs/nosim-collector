@@ -379,6 +379,53 @@ function fetchViaWebview(apiUrl) {
   `);
 }
 
+// ── 배민1플러스 상생요금제 수수료율 수집 (당일 비용 추정용) ──
+// /v4/store/shop-owners/{shopOwnerNo} → baemin1PlusSalesScale.details:
+//   serviceFee(중개이용료율 %) · min/maxDeliveryFee(배달비 범위) · koreanName(등급).
+// 당일 주문은 배민이 settle 을 NOT_READY 로 비워줘 비용이 0 → 노심이 이 율로 추정
+//   (중개료 = 율 × (메뉴 − 매장부담 즉시할인))하게 율을 전달한다. 등급은 매출규모따라
+//   변동(changeDate)하므로 매 수집마다 최신값으로 갱신한다.
+async function collectFeeRate(shopOwnerNumber) {
+  try {
+    const r = await fetchViaWebview(`https://self-api.baemin.com/v4/store/shop-owners/${shopOwnerNumber}`);
+    if (r?.error) { log(`   수수료율 API 에러: ${r.error}`); return null; }
+    const d = r?.data?.baemin1PlusSalesScale?.details;
+    if (!d || d.serviceFee == null) { log('   수수료율 정보 없음 (baemin1PlusSalesScale)'); return null; }
+    const rate = {
+      serviceFee: d.serviceFee,                  // % (예: 7.8)
+      minDeliveryFee: d.minDeliveryFee ?? null,
+      maxDeliveryFee: d.maxDeliveryFee ?? null,
+      gradeName: d.koreanName ?? null,           // "상위 35% 이내"
+      gradeCode: d.detailCode ?? null,           // "NORMAL"
+      changeDate: r.data.baemin1PlusSalesScaleChangeDate ?? null,
+    };
+    log(`   수수료율: 중개 ${rate.serviceFee}% · 배달 ${rate.minDeliveryFee}~${rate.maxDeliveryFee} · ${rate.gradeName}`);
+    return rate;
+  } catch (err) {
+    log(`   수수료율 수집 실패: ${err.message}`);
+    return null;
+  }
+}
+
+// 수수료율을 노심에 전송 (매장owner당 1회). 노심은 store_id 단위로 저장해 당일 비용 추정에 쓴다.
+async function sendFeeRateToSalesKeeper(rate) {
+  if (!config.serverUrl || !config.storeId || !config.sessionToken) return null;
+  if (!rate || rate.serviceFee == null) return null;
+  const url = `${config.serverUrl}/api/stores/${config.storeId}/crawler/baemin/fee-rate`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cookie': `session-token=${config.sessionToken}` },
+      body: JSON.stringify({ ...rate, pocVersion: POC_VERSION }),
+    });
+    log(`   수수료율 전송: ${res.status}`);
+    return { status: res.status, ok: res.ok };
+  } catch (err) {
+    log(`   수수료율 전송 실패: ${err.message}`);
+    return null;
+  }
+}
+
 // ── 데이터 매핑 함수 ──
 // v3.9.2: 배민 정산명세서 A+B+C+D 블록 구조와 원 단위 일치하도록 필드 재정의.
 //   - sale_price: orderBrokerageItems[ORDER_AMOUNT] (할인 전 주문금액, 옵션 포함)
@@ -839,6 +886,10 @@ app.whenReady().then(async () => {
       throw new Error('shopOwnerNumber 캡처 실패');
     }
     log(`   -> shopOwnerNumber: ${shopOwnerNumber}`);
+
+    // 수수료율(상생요금제) 수집 + 노심 전송 — 당일(NOT_READY) 비용 추정용 (owner당 1회)
+    const feeRate = await collectFeeRate(shopOwnerNumber);
+    if (feeRate) await sendFeeRateToSalesKeeper(feeRate);
 
     // ── 3) 매장 목록 API 호출 ──
     emit('status', { msg: '매장 목록 조회 중...' });
