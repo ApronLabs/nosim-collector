@@ -184,6 +184,9 @@ async function sendToSalesKeeper(platform, targetDate, shopId, shopName, orders)
     meetPayment: o.meetAmount || 0,
     settlementAmount: o.depositDueAmount || 0,
     settlementDate: o.depositDueDate || null,
+    // 당일(NOT_READY) 비용 추정용 (노심이 율 × (메뉴 − 매장부담할인)).
+    payAmount: o.payAmount || 0,
+    shopBurdenDiscount: o.shopBurdenDiscount || 0,
     // v3.5.4: 원본 API item 전달 (노심 route raw_data에 저장됨)
     rawItem: o.rawItem || null,
   }));
@@ -445,6 +448,14 @@ function mapOrder(item) {
     return parent.depth3Items.find(i => i.code === subCode)?.amount ?? 0;
   };
 
+  // 매장부담 즉시할인 합 (즉시할인 적용내역의 distributionType=SHOP 분담분).
+  // 당일(settle NOT_READY) 주문은 settle DISCOUNT_AMOUNT 가 비어, 노심이 중개료 추정 기준
+  // (메뉴 − 매장부담할인)을 잡으려면 이 값이 필요 → order.instantDiscounts 에서 직접 합산.
+  const shopBurdenDiscount = (Array.isArray(o.instantDiscounts) ? o.instantDiscounts : [])
+    .reduce((sum, d) => sum + (Array.isArray(d.distributions) ? d.distributions : [])
+      .filter((x) => x.distributionType === 'SHOP')
+      .reduce((a, x) => a + (x.amount || 0), 0), 0);
+
   // orderedAt KST suffix (v3.5.8 유지)
   let orderedAt = o.orderDateTime || '';
   if (orderedAt && !orderedAt.includes('+') && !orderedAt.includes('Z')) {
@@ -512,6 +523,8 @@ function mapOrder(item) {
     meetAmount: s?.meetAmount || 0,
     depositDueAmount: s?.depositDueAmount || 0,
     depositDueDate: s?.depositDueDate || '',
+    payAmount: o.payAmount || 0,
+    shopBurdenDiscount,
     rawItem: item,
   };
 }
