@@ -163,6 +163,14 @@ async function fetchStoreCredentials(serverUrl, storeId, token) {
 // 날짜기반(영업일 합계/주문) 수집 플랫폼
 const DATE_PLATFORMS = ['baemin', 'yogiyo', 'coupangeats', 'ddangyoyo', 'okpos'];
 
+// 정산·수수료가 주문 1~2일 뒤 확정되는 플랫폼 — 당일만 긁으면 비용이 영영 0으로 남는다.
+// daily 모드에서 최근 N일을 재수집(한 세션, 추가 로그인 없음)해 정산을 backfill 한다.
+// 쿠팡이츠는 비용을 당일 내려주므로 제외(=1). 쿠팡은 Akamai 민감 → 재수집 안 함.
+const SETTLEMENT_LAG_PLATFORMS = ['baemin', 'yogiyo', 'ddangyoyo'];
+// 재수집 일수(배민 정산 지연 보통 1~2일, 주말 끼면 더). 기본 3.
+// 주말/공휴일 안전마진이 더 필요하면 .env NOSIM_RECOLLECT_DAYS=4~5 로 상향.
+const RECOLLECT_DAYS = Math.max(1, Number(process.env.NOSIM_RECOLLECT_DAYS) || 3);
+
 // ─── PocRunner 플랫폼별 옵션 ───
 function pocOptionsFor(platform, storeId) {
   const opts = {};
@@ -226,6 +234,8 @@ async function runStore({ serverUrl, storeId, storeName, platforms, targetDate, 
       const r = await runner.run(cred.id, cred.pw, {
         mode: 'daily',
         targetDate,
+        // 정산 후행 플랫폼은 최근 N일 재수집(정산/수수료 backfill), 그 외(쿠팡이츠 등)는 당일만.
+        recollectDays: SETTLEMENT_LAG_PLATFORMS.includes(platform) ? RECOLLECT_DAYS : 1,
         salesKeeper: { apiBaseUrl: serverUrl, salesKeeperStoreId: storeId, sessionToken: token },
         ...pocOptionsFor(platform, storeId),
       });

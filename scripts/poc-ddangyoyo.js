@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
 const { sweepMissingDates } = require('./lib/date-sweep');
+const { recentDaysRange } = require('./lib/date-window');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('ddangyoyo');
 
@@ -26,6 +27,7 @@ const config = {
   pw: getArg('pw'),
   mode: getArg('mode') || 'backfill',
   targetDate: getArg('targetDate'),
+  recollectDays: Number(getArg('recollectDays')) || 1, // daily 모드: 최근 N일 재수집(정산 backfill)
   storeId: getArg('storeId'),
   serverUrl: getArg('serverUrl'),
   sessionToken: getArg('sessionToken'),
@@ -53,12 +55,13 @@ process.on('uncaughtException', (err) => {
 function getDateRangeByMode() {
   if (config.mode === 'daily') {
     if (!config.targetDate) throw new Error('daily 모드에서는 --targetDate=YYYY-MM-DD 필요');
-    const compact = config.targetDate.replace(/-/g, '');
+    // 정산·수수료는 주문 1~2일 뒤 확정 → 최근 N일을 한 세션에서 재수집 (recollectDays=1=당일만).
+    const { startDate, endDate } = recentDaysRange(config.targetDate, config.recollectDays);
     return {
-      startDate: config.targetDate,
-      endDate: config.targetDate,
-      startDateCompact: compact,
-      endDateCompact: compact,
+      startDate,
+      endDate,
+      startDateCompact: startDate.replace(/-/g, ''),
+      endDateCompact: endDate.replace(/-/g, ''),
     };
   }
   // backfill — 올해 1월 1일부터 D-1까지 (v3.5.4부터 전 기간 백필)
