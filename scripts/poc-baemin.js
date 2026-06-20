@@ -188,6 +188,9 @@ async function sendToSalesKeeper(platform, targetDate, shopId, shopName, orders)
     meetPayment: o.meetAmount || 0,
     settlementAmount: o.depositDueAmount || 0,
     settlementDate: o.depositDueDate || null,
+    // 당일(NOT_READY) 비용 추정용 (노심이 율 × (메뉴 − 매장부담할인)).
+    payAmount: o.payAmount || 0,
+    shopBurdenDiscount: o.shopBurdenDiscount || 0,
     // v3.5.4: 원본 API item 전달 (노심 route raw_data에 저장됨)
     rawItem: o.rawItem || null,
   }));
@@ -383,6 +386,53 @@ function fetchViaWebview(apiUrl) {
   `);
 }
 
+// ── 배민1플러스 상생요금제 수수료율 수집 (당일 비용 추정용) ──
+// /v4/store/shop-owners/{shopOwnerNo} → baemin1PlusSalesScale.details:
+//   serviceFee(중개이용료율 %) · min/maxDeliveryFee(배달비 범위) · koreanName(등급).
+// 당일 주문은 배민이 settle 을 NOT_READY 로 비워줘 비용이 0 → 노심이 이 율로 추정
+//   (중개료 = 율 × (메뉴 − 매장부담 즉시할인))하게 율을 전달한다. 등급은 매출규모따라
+//   변동(changeDate)하므로 매 수집마다 최신값으로 갱신한다.
+async function collectFeeRate(shopOwnerNumber) {
+  try {
+    const r = await fetchViaWebview(`https://self-api.baemin.com/v4/store/shop-owners/${shopOwnerNumber}`);
+    if (r?.error) { log(`   수수료율 API 에러: ${r.error}`); return null; }
+    const d = r?.data?.baemin1PlusSalesScale?.details;
+    if (!d || d.serviceFee == null) { log('   수수료율 정보 없음 (baemin1PlusSalesScale)'); return null; }
+    const rate = {
+      serviceFee: d.serviceFee,                  // % (예: 7.8)
+      minDeliveryFee: d.minDeliveryFee ?? null,
+      maxDeliveryFee: d.maxDeliveryFee ?? null,
+      gradeName: d.koreanName ?? null,           // "상위 35% 이내"
+      gradeCode: d.detailCode ?? null,           // "NORMAL"
+      changeDate: r.data.baemin1PlusSalesScaleChangeDate ?? null,
+    };
+    log(`   수수료율: 중개 ${rate.serviceFee}% · 배달 ${rate.minDeliveryFee}~${rate.maxDeliveryFee} · ${rate.gradeName}`);
+    return rate;
+  } catch (err) {
+    log(`   수수료율 수집 실패: ${err.message}`);
+    return null;
+  }
+}
+
+// 수수료율을 노심에 전송 (매장owner당 1회). 노심은 store_id 단위로 저장해 당일 비용 추정에 쓴다.
+async function sendFeeRateToSalesKeeper(rate) {
+  if (!config.serverUrl || !config.storeId || !config.sessionToken) return null;
+  if (!rate || rate.serviceFee == null) return null;
+  const url = `${config.serverUrl}/api/stores/${config.storeId}/crawler/baemin/fee-rate`;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Cookie': `session-token=${config.sessionToken}` },
+      body: JSON.stringify({ ...rate, pocVersion: POC_VERSION }),
+    });
+    log(`   수수료율 전송: ${res.status}`);
+    return { status: res.status, ok: res.ok };
+  } catch (err) {
+    log(`   수수료율 전송 실패: ${err.message}`);
+    return null;
+  }
+}
+
 // ── 데이터 매핑 함수 ──
 // v3.9.2: 배민 정산명세서 A+B+C+D 블록 구조와 원 단위 일치하도록 필드 재정의.
 //   - sale_price: orderBrokerageItems[ORDER_AMOUNT] (할인 전 주문금액, 옵션 포함)
@@ -401,6 +451,14 @@ function mapOrder(item) {
     if (!parent || !Array.isArray(parent.depth3Items)) return 0;
     return parent.depth3Items.find(i => i.code === subCode)?.amount ?? 0;
   };
+
+  // 매장부담 즉시할인 합 (즉시할인 적용내역의 distributionType=SHOP 분담분).
+  // 당일(settle NOT_READY) 주문은 settle DISCOUNT_AMOUNT 가 비어, 노심이 중개료 추정 기준
+  // (메뉴 − 매장부담할인)을 잡으려면 이 값이 필요 → order.instantDiscounts 에서 직접 합산.
+  const shopBurdenDiscount = (Array.isArray(o.instantDiscounts) ? o.instantDiscounts : [])
+    .reduce((sum, d) => sum + (Array.isArray(d.distributions) ? d.distributions : [])
+      .filter((x) => x.distributionType === 'SHOP')
+      .reduce((a, x) => a + (x.amount || 0), 0), 0);
 
   // orderedAt KST suffix (v3.5.8 유지)
   let orderedAt = o.orderDateTime || '';
@@ -469,6 +527,8 @@ function mapOrder(item) {
     meetAmount: s?.meetAmount || 0,
     depositDueAmount: s?.depositDueAmount || 0,
     depositDueDate: s?.depositDueDate || '',
+    payAmount: o.payAmount || 0,
+    shopBurdenDiscount,
     rawItem: item,
   };
 }
@@ -843,6 +903,19 @@ app.whenReady().then(async () => {
       throw new Error('shopOwnerNumber 캡처 실패');
     }
     log(`   -> shopOwnerNumber: ${shopOwnerNumber}`);
+
+    // 수수료율(상생요금제)은 하루 1회만 조회·전송 — 등급은 매출규모따라 가끔 변동(자주 조회 불필요).
+    // 당일(NOT_READY) 비용 추정용. 전송 성공 시 마커에 그날 날짜 기록 → 같은 날 재실행 시 skip.
+    const feeMarker = path.join(os.homedir(), `.poc-baemin-feerate-${String(config.storeId || 'x').slice(0, 8)}`);
+    const kstDay = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+    let feeFetchedToday = false;
+    try { feeFetchedToday = fs.readFileSync(feeMarker, 'utf8').trim() === kstDay; } catch {}
+    if (!feeFetchedToday) {
+      const feeRate = await collectFeeRate(shopOwnerNumber);
+      if (feeRate && (await sendFeeRateToSalesKeeper(feeRate))?.ok) {
+        try { fs.writeFileSync(feeMarker, kstDay); } catch {}
+      }
+    }
 
     // ── 3) 매장 목록 API 호출 ──
     emit('status', { msg: '매장 목록 조회 중...' });
