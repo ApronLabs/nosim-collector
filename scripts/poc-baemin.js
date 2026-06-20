@@ -9,6 +9,7 @@ const path = require('path');
 const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
 const { sweepMissingDates } = require('./lib/date-sweep');
+const { recentDaysRange } = require('./lib/date-window');
 
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('baemin');
@@ -24,6 +25,7 @@ const config = {
   pw: getArg('pw'),
   mode: getArg('mode') || 'backfill',       // backfill | daily
   targetDate: getArg('targetDate'),           // YYYY-MM-DD (daily 모드용)
+  recollectDays: Number(getArg('recollectDays')) || 1, // daily 모드: 최근 N일 재수집(정산 backfill)
   storeId: getArg('storeId'),                 // 매출지킴이 매장 UUID
   serverUrl: getArg('serverUrl'),             // http://localhost:3000
   sessionToken: getArg('sessionToken'),       // JWT 토큰
@@ -73,7 +75,9 @@ function getYesterday() {
 function getDateRangeByMode() {
   if (config.mode === 'daily') {
     if (!config.targetDate) throw new Error('daily 모드에서는 --targetDate=YYYY-MM-DD 필요');
-    return { startDate: config.targetDate, endDate: config.targetDate };
+    // 정산·수수료는 주문 1~2일 뒤 확정 → targetDate 포함 최근 N일을 한 세션에서 재수집.
+    // recollectDays=1(기본)이면 start=end=targetDate = 당일만(기존 동작).
+    return recentDaysRange(config.targetDate, config.recollectDays);
   }
   // backfill: 1월 1일 ~ D-1 (v3.5.4부터 전 기간 백필)
   return { startDate: getBackfillStart(), endDate: getYesterday() };

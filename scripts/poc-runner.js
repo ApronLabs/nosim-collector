@@ -63,6 +63,11 @@ class PocRunner {
       `--mode=${options.mode || 'daily'}`,
     );
     if (options.targetDate) args.push(`--targetDate=${options.targetDate}`);
+    // 정산·수수료 후행 채움(배민/요기요/땡겨요): daily 모드에서 최근 N일을 한 세션에서
+    // 재수집해 정산을 backfill. 단일 로그인이라 추가 부하 없음. 1(기본)=당일만=기존 동작.
+    if (options.recollectDays && options.recollectDays > 1) {
+      args.push(`--recollectDays=${options.recollectDays}`);
+    }
     if (options.salesKeeper) {
       args.push(`--storeId=${options.salesKeeper.salesKeeperStoreId}`);
       args.push(`--serverUrl=${options.salesKeeper.apiBaseUrl}`);
