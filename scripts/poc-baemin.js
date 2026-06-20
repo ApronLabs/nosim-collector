@@ -887,9 +887,18 @@ app.whenReady().then(async () => {
     }
     log(`   -> shopOwnerNumber: ${shopOwnerNumber}`);
 
-    // 수수료율(상생요금제) 수집 + 노심 전송 — 당일(NOT_READY) 비용 추정용 (owner당 1회)
-    const feeRate = await collectFeeRate(shopOwnerNumber);
-    if (feeRate) await sendFeeRateToSalesKeeper(feeRate);
+    // 수수료율(상생요금제)은 하루 1회만 조회·전송 — 등급은 매출규모따라 가끔 변동(자주 조회 불필요).
+    // 당일(NOT_READY) 비용 추정용. 전송 성공 시 마커에 그날 날짜 기록 → 같은 날 재실행 시 skip.
+    const feeMarker = path.join(os.homedir(), `.poc-baemin-feerate-${String(config.storeId || 'x').slice(0, 8)}`);
+    const kstDay = new Date(Date.now() + 9 * 3600 * 1000).toISOString().slice(0, 10);
+    let feeFetchedToday = false;
+    try { feeFetchedToday = fs.readFileSync(feeMarker, 'utf8').trim() === kstDay; } catch {}
+    if (!feeFetchedToday) {
+      const feeRate = await collectFeeRate(shopOwnerNumber);
+      if (feeRate && (await sendFeeRateToSalesKeeper(feeRate))?.ok) {
+        try { fs.writeFileSync(feeMarker, kstDay); } catch {}
+      }
+    }
 
     // ── 3) 매장 목록 API 호출 ──
     emit('status', { msg: '매장 목록 조회 중...' });
