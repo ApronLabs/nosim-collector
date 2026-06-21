@@ -29,4 +29,14 @@ function shouldStopPaging(content, startMs) {
   return pageOldestMs(content) < startMs;
 }
 
-module.exports = { ordersInRange, pageOldestMs, shouldStopPaging };
+/**
+ * 한 페이지(pageSize) 미만이면 마지막/단일 페이지 → 다음 페이지 없음.
+ * 주문이 적거나(1~9건) 온보딩중인 서브매장은 페이지네이션 컨트롤 자체가 없어
+ * '다음 버튼 못 찾음' 오탐을 낸다. full 페이지가 아니면 클릭 시도 전에 정상 종료하기 위한 판정.
+ * (full 페이지면 false → 다음 페이지 가능성 있으니 계속 — 데이터 누락 없음)
+ */
+function isLastPage(content, pageSize) {
+  return !Array.isArray(content) || content.length < pageSize;
+}
+
+module.exports = { ordersInRange, pageOldestMs, shouldStopPaging, isLastPage };

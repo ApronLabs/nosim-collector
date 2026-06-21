@@ -10,7 +10,7 @@ const fs = require('fs');
 const { RawDumper } = require('./lib/raw-dumper');
 const { sweepMissingDates } = require('./lib/date-sweep');
 const { rnd, jitter, buildUserAgent } = require('./lib/human');
-const { ordersInRange, shouldStopPaging } = require('./lib/coupang-paging');
+const { ordersInRange, shouldStopPaging, isLastPage } = require('./lib/coupang-paging');
 const POC_VERSION = app.getVersion() || 'unknown';
 const rawDumper = new RawDumper('coupangeats');
 
@@ -569,6 +569,9 @@ async function collectStoreViaUi(name, id, dr) {
     // '다음 버튼 못 찾음' 오탐 방지(예: 주문 0건인 샵인샵 매장).
     if (content.length === 0) break;
     if (shouldStopPaging(content, dr.startMs)) break; // 다음은 더 과거뿐 → 종료(날짜선택기 불필요의 핵심)
+    // 한 페이지(PAGE_SIZE) 미만 = 마지막/단일 페이지 → 다음 없음. 주문 적은·온보딩중 서브매장
+    // (예: 샤브편백 OB_CHECKING)은 페이지네이션 컨트롤이 없어 아래 '다음버튼 못찾음' 오탐을 냄 → 여기서 정상 종료.
+    if (isLastPage(content, PAGE_SIZE)) break;
     if (pageNum + 1 >= maxPages) break;     // 안전 상한
     // 실제 '다음' 버튼 클릭 → 페이지가 새 주문 XHR 발생
     await humanMouse(rnd(1, 3));

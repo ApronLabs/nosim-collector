@@ -2,7 +2,7 @@
 // node --test scripts/lib/coupang-paging.test.js
 const test = require('node:test');
 const assert = require('node:assert');
-const { ordersInRange, pageOldestMs, shouldStopPaging } = require('./coupang-paging');
+const { ordersInRange, pageOldestMs, shouldStopPaging, isLastPage } = require('./coupang-paging');
 
 // 실측 기반: 6/11 KST 00:00~23:59 의 ms 구간
 const START = Date.UTC(2026, 5, 11, 0, 0, 0) - 9 * 3600000; // KST 6/11 00:00
@@ -48,4 +48,13 @@ test('통합 시나리오 — 오늘 12건(2페이지)+어제, page1 에서 멈�
   const page1 = [{ createdAt: t(2) }, { createdAt: t(1) }, ...Array.from({ length: 8 }, (_, i) => ({ createdAt: yesterday(23 - i) }))];
   assert.strictEqual(ordersInRange(page1, START, END).length, 2);
   assert.strictEqual(shouldStopPaging(page1, START), true);
+});
+
+test('isLastPage — 비full=마지막(다음 시도 안 함), full=계속 / 오탐 방지', () => {
+  // 주문 적은·온보딩중 서브매장: 1~9건 또는 0건 → 마지막 페이지(다음 버튼 없음이 정상)
+  assert.strictEqual(isLastPage([], 10), true);
+  assert.strictEqual(isLastPage([{}, {}, {}, {}], 10), true); // 4건 < 10
+  assert.strictEqual(isLastPage(null, 10), true); // 방어
+  // full 페이지(10건) → 다음 페이지 있을 수 있으니 계속(누락 방지)
+  assert.strictEqual(isLastPage(Array.from({ length: 10 }), 10), false);
 });
