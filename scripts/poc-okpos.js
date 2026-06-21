@@ -104,7 +104,7 @@ function getDateRangeByMode() {
 }
 
 // ── 매출지킴이 API 전송 ──
-async function sendToSalesKeeper(targetDate, platformStoreId, salesData, rawData) {
+async function sendToSalesKeeper(targetDate, platformStoreId, salesData, rawData, orders = []) {
   if (!config.serverUrl || !config.storeId || !config.sessionToken) return null;
   const url = `${config.serverUrl}/api/stores/${config.storeId}/crawler/okpos`;
 
@@ -113,6 +113,7 @@ async function sendToSalesKeeper(targetDate, platformStoreId, salesData, rawData
     platformStoreId,
     sales: salesData,
     rawData,
+    orders, // 영수증별(bill010) 라인 — 자동출고 입력
     pocVersion: POC_VERSION,
   });
   try {
@@ -221,6 +222,8 @@ async function queryPage(win, pageUrl, iframPattern, dateField1, dateField2, sta
 
   // XHR 인터셉트
   await exec(dataFrame, INTERCEPT_SCRIPT, 'intercept');
+  // 멀티콜(영수증별 날짜별 반복) 시 이전 캡처가 누적돼 옛 응답을 반환하는 것 방지 — 매 조회 전 비움.
+  await exec(dataFrame, `window._captures = []`, 'reset-captures');
 
   // 날짜 설정 (자동 감지)
   log(`  날짜: ${startVal} ~ ${endVal}`);
@@ -346,6 +349,34 @@ function mapDailyRow(d) {
   };
 }
 
+// ── 영수증별(bill010) 조회 → BILL_NO 별 주문 묶음 (자동출고 라인). 옵션 없음(음료·사이드도 독립 PROD_CD) ──
+async function collectBillReceipts(win, billUrl, dateStr) {
+  if (!billUrl) return [];
+  // bill010 은 date1 단일일자. queryPage 자동감지로 날짜 입력 세팅(date1).
+  const data = await queryPage(win, billUrl, 'bill010', 'date1', '', dateStr, dateStr, `영수증별 조회 (${dateStr})`);
+  if (!Array.isArray(data) || data.length === 0) return [];
+  const byBill = {};
+  for (const r of data) {
+    const billNo = String(r.BILL_NO || '').trim();
+    if (!billNo) continue;
+    (byBill[billNo] = byBill[billNo] || []).push(r);
+  }
+  return Object.keys(byBill).map(billNo => {
+    const lines = byBill[billNo];
+    return {
+      billNo,
+      saleDt: dateStr,
+      posInsDt: lines[0]?.POS_INS_DT || null,
+      items: lines.map(r => ({
+        prodCd: String(r.PROD_CD || ''),
+        prodNm: r.PROD_NM || '',
+        quantity: parseInt(r.SALE_QTY, 10) || 0, // 음수 = 취소
+        saleAmt: parseInt(r.SALE_AMT, 10) || 0,
+      })),
+    };
+  });
+}
+
 // ── 메인 ──
 app.whenReady().then(async () => {
   fs.writeFileSync(LOG_FILE, '');
@@ -413,18 +444,20 @@ app.whenReady().then(async () => {
     const menuUrls = await exec(menuFrame, `
       (function() {
         if (typeof AL === 'undefined') return JSON.stringify({ error: 'NO_AL' });
-        var daily = null;
+        var daily = null, bill = null;
         for (var i = 0; i < AL.length; i++) {
           var item = AL[i];
           if (item.PGM_LCLS_NM === '매출관리' && item.PGM_MCLS_NM === '매출현황') {
             if (item.PGM_NM === '일자별') daily = item.PGM_FILE_NM;
+            if (item.PGM_NM === '영수증별매출상세현황') bill = item.PGM_FILE_NM;
           }
         }
-        return JSON.stringify({ daily: daily });
+        return JSON.stringify({ daily: daily, bill: bill });
       })()
     `, 'menu');
     const urls = JSON.parse(menuUrls);
     log(`  일자별: ${urls.daily}`);
+    log(`  영수증별: ${urls.bill || '(없음)'}`);
 
     if (!urls.daily) {
       emit('error', { error: '메뉴 URL 미발견' });
@@ -460,12 +493,15 @@ app.whenReady().then(async () => {
     const mappedOrders = [];
     for (const dateKey of sortedDates) {
       const rows = byDate[dateKey];
+      // 영수증별(bill010) 라인 수집 — 자동출고 입력 (날짜별 1회)
+      const receipts = await collectBillReceipts(win, urls.bill, dateKey);
+      if (receipts.length) log(`   영수증 ${receipts.length}건 (${dateKey})`);
       for (const row of rows) {
         const mapped = mapDailyRow(row);
         mappedOrders.push(mapped);
 
-        // 매출지킴이 API 전송 (날짜별)
-        await sendToSalesKeeper(dateKey, shopCd, mapped, row);
+        // 매출지킴이 API 전송 (날짜별 매출 + 영수증 라인)
+        await sendToSalesKeeper(dateKey, shopCd, mapped, row, receipts);
       }
     }
 
