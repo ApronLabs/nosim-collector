@@ -136,6 +136,8 @@ async function sendToSalesKeeper(platform, targetDate, shopId, shopName, orders)
     totalPayment: o.salePrice || o.amount || 0,
     // v3.5.5: 총금액(할인 전) — 노심에서 쿠팡부담 쿠폰 역산에 사용
     totalAmount: o.totalAmount || 0,
+    // 메뉴 라인 (자동출고용) — 노심 crawler_order_items 로 저장. dishId·itemOptions 포함.
+    items: o.items || [],
     orderSettlement: {
       commissionTotal: o.settlement?.commissionTotal || 0,
       commissionVat: o.settlement?.commissionVat || 0,
@@ -738,7 +740,21 @@ async function processAndSend({ name, id, dr, allOrders, totalOrderCount, totalS
       totalAmount: o.totalAmount || 0,
       actuallyAmount: o.actuallyAmount || 0,
       menuSummary: (o.items || []).map(i => `${i.name} x${i.quantity}`).join(', '),
-      items: (o.items || []).map(i => ({ name: i.name, quantity: i.quantity })),
+      // 메뉴 라인 (자동출고용) — dishId(안정 메뉴ID)·단가·itemOptions(optionItemId) 보존.
+      // 노심 인제스트가 crawler_order_items(platform_menu_id=dishId, options) 로 저장.
+      items: (o.items || []).map(i => ({
+        dishId: i.dishId,
+        name: i.name,
+        quantity: i.quantity,
+        unitSalePrice: i.unitSalePrice,
+        subTotalPrice: i.subTotalPrice,
+        itemOptions: (i.itemOptions || []).map(opt => ({
+          optionItemId: opt.optionItemId,
+          optionName: opt.optionName,
+          optionQuantity: opt.optionQuantity,
+          optionPrice: opt.optionPrice,
+        })),
+      })),
       // 정산 상세 (API 응답 그대로)
       settlement: {
         commissionTotal: settlement.commissionTotal || 0,
