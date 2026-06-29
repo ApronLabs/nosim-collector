@@ -1,4 +1,4 @@
-; Custom NSIS script for barcode-scanner
+; Custom NSIS script for nosim-collector (구 barcode-scanner)
 ; electron-builder 24.13.2+ "Failed to uninstall old application files" 에러 해결
 ;
 ; 원인: 구 버전 언인스톨러를 실행하려다 프로세스 감지/파일 잠금으로 실패

@@ -63,8 +63,8 @@ npm -v
 ### 1-3. repo 클론
 ```powershell
 cd $env:USERPROFILE\Desktop
-git clone https://github.com/ApronLabs/barcode-scanner.git
-cd barcode-scanner
+git clone https://github.com/ApronLabs/nosim-collector.git
+cd nosim-collector
 ```
 
 ### 1-4. 의존성 설치

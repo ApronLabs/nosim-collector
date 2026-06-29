@@ -1,5 +1,5 @@
 /**
- * 매출지킴이 바코드 스캐너 v3 - Electron 메인 프로세스
+ * 노심 매출 수집기 v3 - Electron 메인 프로세스
  *
  * EC2 API 연동 + 로그인 + 매장 선택 UI
  * Global Key Listener로 포커스 없이도 바코드 감지
@@ -118,6 +118,9 @@ if (!gotTheLock) {
 
 let mainWindow = null;
 
+// ⚠️ 의도적으로 옛 이름 유지 — app 이름이 userData 경로(%APPDATA%/<이름>/)를 결정한다.
+// 바꾸면 PC 의 기존 설정(electron-store)·노심 세션 쿠키가 고아가 되므로, 표시 이름(productName/
+// 윈도우 타이틀)만 '노심 매출 수집기'로 바꾸고 데이터 경로 식별자는 그대로 둔다.
 app.setName('매출지킴이 바코드 스캐너');
 
 // ========================================
@@ -998,7 +1001,7 @@ function createWindow() {
     height: 750,
     resizable: true,
     show: false, // HTML 렌더 완료 후 show — 흰 화면 깜빡임 방지 + 오버레이 먼저 보이게
-    title: '매출지킴이 바코드 스캐너',
+    title: '노심 매출 수집기',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1025,7 +1028,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   console.log('========================================');
-  console.log('  매출지킴이 바코드 스캐너 v' + app.getVersion());
+  console.log('  노심 매출 수집기 v' + app.getVersion());
   console.log('========================================');
 
   createWindow();

@@ -1,9 +1,9 @@
 {
-  "name": "barcode-scanner",
+  "name": "nosim-collector",
   "version": "3.12.0",
-  "description": "매출지킴이 바코드 스캐너",
+  "description": "노심 매출 수집기 — 배달 플랫폼·POS 매출 자동 수집 (Windows)",
   "main": "main.js",
-  "author": "Semicolon Dev Team",
+  "author": "ApronLabs",
   "scripts": {
     "start": "electron .",
     "dashboard": "electron . --dashboard",
@@ -30,7 +30,7 @@
   },
   "build": {
     "appId": "com.semicolon.barcode-scanner",
-    "productName": "매출지킴이 바코드 스캐너",
+    "productName": "노심 매출 수집기",
     "directories": {
       "output": "dist"
     },
@@ -76,14 +76,14 @@
       {
         "provider": "github",
         "owner": "ApronLabs",
-        "repo": "barcode-scanner"
+        "repo": "nosim-collector"
       }
     ],
     "nsis": {
       "oneClick": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "매출지킴이 바코드 스캐너"
+      "shortcutName": "노심 매출 수집기"
     }
   }
 }
