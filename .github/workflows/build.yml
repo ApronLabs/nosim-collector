@@ -1,4 +1,4 @@
-name: Build Barcode Scanner
+name: Build nosim-collector (Electron installer)
 
 on:
   push:
